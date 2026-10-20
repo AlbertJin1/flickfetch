@@ -1,0 +1,6 @@
+  Determining projects to restore...
+  Restored H:\CODES\flickfetch\FlickFetch.csproj (in 334 ms).
+H:\CODES\flickfetch\SettingsWindow.axaml : Avalonia warning AVLN3001: XAML resource "avares://FlickFetch/SettingsWindow.axaml" won't be reachable via runtime loader, as no public constructor was found [H:\CODES\flickfetch\FlickFetch.csproj]
+H:\CODES\flickfetch\SpotifyPlaylistWindow.axaml : Avalonia warning AVLN3001: XAML resource "avares://FlickFetch/SpotifyPlaylistWindow.axaml" won't be reachable via runtime loader, as no public constructor was found [H:\CODES\flickfetch\FlickFetch.csproj]
+  FlickFetch -> H:\CODES\flickfetch\bin\Release\net8.0\win-x64\FlickFetch.dll
+  FlickFetch -> H:\CODES\flickfetch\publish\

@@ -1,0 +1,9 @@
+FlickFetch
+
+Copyright © 2026 Jessie Albert Regualos
+
+This copyright attribution applies to the original application interface, application-specific source code, and integration work contributed to FlickFetch, to the extent owned by the named author.
+
+Bundled third-party tools, libraries, site content, artwork, APIs, names, and trademarks remain the property of their respective owners and are governed by their own terms and licenses. See THIRD-PARTY-NOTICES.md and the third-party license/source materials included in release bundles.
+
+FlickFetch does not facilitate Spotify audio downloads or DRM circumvention. Download media only when you have the right to do so and comply with applicable law and service terms.

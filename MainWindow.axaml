@@ -1,0 +1,219 @@
+<Window x:Class="FlickFetch.MainWindow"
+        xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="FlickFetch — Media Workspace"
+        Width="1480" Height="940" MinWidth="1120" MinHeight="720"
+        WindowStartupLocation="CenterScreen" Background="{StaticResource WindowBrush}"
+        DragDrop.AllowDrop="True" DragDrop.DragOver="Window_DragOver" DragDrop.Drop="Window_Drop"
+        Opened="Window_Loaded" Closing="MainWindow_Closing">
+  <Grid RowDefinitions="Auto,*,Auto" Margin="0">
+    <!-- Header -->
+    <Border Grid.Row="0" Background="#FFFFFF" BorderBrush="#E3E8F1" BorderThickness="0,0,0,1" Padding="26,16">
+      <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="22">
+        <Border Width="44" Height="44" CornerRadius="13" Background="#5B5CE2" VerticalAlignment="Center">
+          <TextBlock Text="F" FontSize="26" FontWeight="Bold" Foreground="#FFFFFF" HorizontalAlignment="Center" VerticalAlignment="Center" />
+        </Border>
+        <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="2">
+          <StackPanel Orientation="Horizontal" Spacing="9" VerticalAlignment="Center">
+            <TextBlock Text="FlickFetch" FontSize="21" FontWeight="Bold" />
+            <Border Background="#F0F1FF" CornerRadius="6" Padding="7,3" VerticalAlignment="Center">
+              <TextBlock Text="MEDIA WORKSPACE" FontSize="8.5" FontWeight="Bold" Foreground="#5556CE" />
+            </Border>
+          </StackPanel>
+          <TextBlock Text="Bring your media links together. Queue, monitor, and manage every download." FontSize="11.5" Foreground="#778198" />
+        </StackPanel>
+        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="9" VerticalAlignment="Center">
+          <Border Background="#F8FAFC" BorderBrush="#E2E7F0" BorderThickness="1" CornerRadius="9" Padding="11,8" VerticalAlignment="Center">
+            <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+              <Ellipse x:Name="ToolStatusDot" Width="8" Height="8" Fill="#D99A31" VerticalAlignment="Center" />
+              <TextBlock x:Name="ToolStatusText" Text="Checking tools…" FontSize="10.5" Foreground="#536078" VerticalAlignment="Center" MaxWidth="230" />
+            </StackPanel>
+          </Border>
+          <Button Classes="secondary" Content="⚙  Settings" Click="Settings_Click" />
+          <Button Classes="quiet" Content="About" Click="About_Click" />
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <!-- Main workspace -->
+    <Grid Grid.Row="1" ColumnDefinitions="370,*" ColumnSpacing="18" Margin="22,20,22,18">
+      <!-- Compose / preferences rail -->
+      <ScrollViewer Grid.Column="0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Spacing="14">
+          <StackPanel Margin="2,0,0,0" Spacing="4">
+            <TextBlock Text="CREATE DOWNLOAD" Classes="eyebrow" />
+            <TextBlock Text="Add media to your queue" FontSize="21" FontWeight="Bold" />
+            <TextBlock Text="Paste one or more links. Public Spotify playlists can be imported for YouTube match review." FontSize="11.5" Foreground="#778198" />
+          </StackPanel>
+
+          <Border Background="#FFFFFF" BorderBrush="#E2E7F0" BorderThickness="1" CornerRadius="15" Padding="16">
+            <StackPanel Spacing="10">
+              <Grid ColumnDefinitions="*,Auto">
+                <TextBlock Text="MEDIA URLS" Classes="eyebrow" VerticalAlignment="Center" />
+                <TextBlock Grid.Column="1" Text="Ctrl + Enter to add" FontSize="9.5" Foreground="#929BAE" VerticalAlignment="Center" />
+              </Grid>
+              <Grid>
+                <TextBox x:Name="UrlBox" MinHeight="106" AcceptsReturn="True" TextWrapping="Wrap" VerticalContentAlignment="Top" TextChanged="UrlBox_TextChanged" KeyDown="UrlBox_PreviewKeyDown" />
+                <TextBlock x:Name="UrlPlaceholder" IsVisible="False" IsHitTestVisible="False" Text="Paste links here, one per line" Foreground="#9AA3B4" FontSize="11" Margin="12,11,12,0" VerticalAlignment="Top" />
+              </Grid>
+              <Grid ColumnDefinitions="*,10,*">
+                <Button Classes="primary" Content="＋  Add to queue" Click="Add_Click" />
+                <Button Grid.Column="2" Classes="secondary" Content="⇩  Paste links" Click="PasteLinks_Click" />
+              </Grid>
+              <Button Classes="quiet" HorizontalAlignment="Stretch" Content="♫  Import public Spotify playlist" Click="SpotifyPlaylist_Click" />
+              <Border Height="1" Background="#EEF1F6" Margin="0,2" />
+              <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                <StackPanel Spacing="3">
+                  <TextBlock Text="Quick inspect" FontSize="11.5" FontWeight="SemiBold" />
+                  <TextBlock Text="View source metadata or available formats for the first link." FontSize="10" Foreground="#808BA0" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                  <Button Classes="secondary" Content="Info" Padding="10,7" MinHeight="32" Click="Info_Click" />
+                  <Button Classes="secondary" Content="Formats" Padding="10,7" MinHeight="32" Click="Formats_Click" />
+                </StackPanel>
+              </Grid>
+            </StackPanel>
+          </Border>
+
+          <Border Background="#FFFFFF" BorderBrush="#E2E7F0" BorderThickness="1" CornerRadius="15" Padding="16">
+            <StackPanel Spacing="11">
+              <StackPanel Spacing="3">
+                <TextBlock Text="Download profile" FontSize="14" FontWeight="Bold" />
+                <TextBlock Text="Defaults are applied to new queue items." FontSize="10.5" Foreground="#858FA3" />
+              </StackPanel>
+              <StackPanel Spacing="5">
+                <TextBlock Text="QUALITY PRESET" Classes="eyebrow" />
+                <ComboBox x:Name="QualityBox" SelectionChanged="Format_Changed" />
+              </StackPanel>
+              <Grid ColumnDefinitions="*,12,*">
+                <StackPanel Spacing="5">
+                  <TextBlock Text="CONTAINER" Classes="eyebrow" />
+                  <ComboBox x:Name="ContainerBox" SelectionChanged="Format_Changed" />
+                </StackPanel>
+                <StackPanel Grid.Column="2" Spacing="5">
+                  <TextBlock Text="AUDIO FORMAT" Classes="eyebrow" />
+                  <ComboBox x:Name="AudioFormatBox" SelectionChanged="Format_Changed" />
+                </StackPanel>
+              </Grid>
+              <StackPanel Spacing="1">
+                <CheckBox x:Name="PlaylistCheckBox" Content="Download full playlists" IsCheckedChanged="Format_Changed" />
+                <CheckBox x:Name="CompatCheckBox" Content="Prefer H.264 compatibility" IsCheckedChanged="Format_Changed" />
+              </StackPanel>
+              <Border Background="#F7F8FC" CornerRadius="9" Padding="10,9">
+                <TextBlock Text="Advanced naming, subtitles, cookies, proxy, and network options are available in Settings." FontSize="10.2" Foreground="#7C879C" />
+              </Border>
+            </StackPanel>
+          </Border>
+
+          <Border Background="#FFFFFF" BorderBrush="#E2E7F0" BorderThickness="1" CornerRadius="15" Padding="16">
+            <StackPanel Spacing="10">
+              <TextBlock Text="Save location" FontSize="14" FontWeight="Bold" />
+              <TextBox x:Name="OutputPathBox" />
+              <Grid ColumnDefinitions="*,10,*">
+                <Button Classes="secondary" Content="▣  Browse folder" Click="BrowseOutput_Click" />
+                <Button Grid.Column="2" Classes="secondary" Content="↗  Open folder" Click="OpenOutput_Click" />
+              </Grid>
+            </StackPanel>
+          </Border>
+        </StackPanel>
+      </ScrollViewer>
+
+      <!-- Queue and activity -->
+      <Grid Grid.Column="1" RowDefinitions="Auto,*,220" RowSpacing="14">
+        <Grid Grid.Row="0" ColumnDefinitions="*,Auto" ColumnSpacing="12">
+          <StackPanel Spacing="4" VerticalAlignment="Center">
+            <TextBlock Text="Download queue" FontSize="21" FontWeight="Bold" />
+            <TextBlock x:Name="QueueSummaryText" Text="Your downloads will appear here." FontSize="11" Foreground="#778198" />
+          </StackPanel>
+          <WrapPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">
+            <Button x:Name="StartPauseButton" Classes="secondary" Content="Ⅱ  Pause queue" Click="StartPause_Click" Margin="0,0,7,0" />
+            <Button Classes="secondary" Content="Stop all" Click="StopAll_Click" Margin="0,0,7,0" />
+            <Button Classes="secondary" Content="Retry failed" Click="RetryFailed_Click" Margin="0,0,7,0" />
+            <Button Classes="quiet" Content="Clear finished" Click="ClearFinished_Click" />
+          </WrapPanel>
+        </Grid>
+
+        <Border Grid.Row="1" Background="#FFFFFF" BorderBrush="#E2E7F0" BorderThickness="1" CornerRadius="15" ClipToBounds="True">
+          <Grid RowDefinitions="Auto,*">
+            <Border Grid.Row="0" Background="#F8F9FC" BorderBrush="#E9EDF4" BorderThickness="0,0,0,1" Padding="13,11">
+              <Grid ColumnDefinitions="34,*,125,165,80,68" ColumnSpacing="8">
+                <TextBlock Text="#" Classes="eyebrow" />
+                <TextBlock Grid.Column="1" Text="CONTENT" Classes="eyebrow" />
+                <TextBlock Grid.Column="2" Text="STATUS" Classes="eyebrow" />
+                <TextBlock Grid.Column="3" Text="PROGRESS" Classes="eyebrow" />
+                <TextBlock Grid.Column="4" Text="SPEED" Classes="eyebrow" />
+                <TextBlock Grid.Column="5" Text="ETA" Classes="eyebrow" />
+              </Grid>
+            </Border>
+            <Grid Grid.Row="1">
+              <ListBox x:Name="QueueGrid" SelectionChanged="QueueGrid_SelectionChanged" SelectionMode="Multiple">
+                <ListBox.ItemTemplate>
+                  <DataTemplate>
+                    <Border BorderBrush="#EEF1F6" BorderThickness="0,0,0,1" Padding="13,10">
+                      <Grid ColumnDefinitions="34,*,125,165,80,68" ColumnSpacing="8" MinHeight="49">
+                        <TextBlock Text="{Binding Number}" FontSize="10.5" Foreground="#8993A7" VerticalAlignment="Center" />
+                        <StackPanel Grid.Column="1" Spacing="4" VerticalAlignment="Center">
+                          <TextBlock Text="{Binding DisplayTitle}" FontSize="11.5" FontWeight="SemiBold" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxLines="1" />
+                          <TextBlock Text="{Binding Url}" FontSize="9.5" Foreground="#8993A7" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxLines="1" />
+                        </StackPanel>
+                        <Border Grid.Column="2" Background="#F2F4F8" CornerRadius="6" Padding="7,5" VerticalAlignment="Center" HorizontalAlignment="Left" MaxWidth="120">
+                          <TextBlock Text="{Binding StatusText}" FontSize="9.5" FontWeight="SemiBold" Foreground="#5C687E" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" MaxLines="1" />
+                        </Border>
+                        <StackPanel Grid.Column="3" Spacing="6" VerticalAlignment="Center">
+                          <Grid ColumnDefinitions="*,Auto">
+                            <TextBlock Text="{Binding ProgressCaption}" FontSize="9.5" Foreground="#778198" />
+                            <TextBlock Grid.Column="1" Text="{Binding ProgressText}" FontSize="9.5" FontWeight="SemiBold" Foreground="#5B5CE2" />
+                          </Grid>
+                          <ProgressBar Minimum="0" Maximum="100" Value="{Binding ProgressValue}" />
+                        </StackPanel>
+                        <TextBlock Grid.Column="4" Text="{Binding SpeedText}" FontSize="10" Foreground="#69758A" VerticalAlignment="Center" />
+                        <TextBlock Grid.Column="5" Text="{Binding EtaText}" FontSize="10" Foreground="#69758A" VerticalAlignment="Center" />
+                      </Grid>
+                    </Border>
+                  </DataTemplate>
+                </ListBox.ItemTemplate>
+              </ListBox>
+              <StackPanel x:Name="EmptyQueuePanel" IsVisible="True" IsHitTestVisible="False" HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="9" Margin="26">
+                <Border Width="62" Height="62" CornerRadius="18" Background="#F0F1FF" HorizontalAlignment="Center">
+                  <TextBlock Text="↓" FontSize="31" Foreground="#5B5CE2" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Border>
+                <TextBlock Text="Your queue is ready" FontSize="15" FontWeight="Bold" HorizontalAlignment="Center" />
+                <TextBlock Text="Add a link on the left to see download progress here." FontSize="10.5" Foreground="#8A94A7" HorizontalAlignment="Center" TextAlignment="Center" MaxWidth="260" />
+              </StackPanel>
+            </Grid>
+          </Grid>
+        </Border>
+
+        <Border Grid.Row="2" Background="#FFFFFF" BorderBrush="#E2E7F0" BorderThickness="1" CornerRadius="15" Padding="15,12">
+          <Grid RowDefinitions="Auto,*" RowSpacing="9">
+            <Grid ColumnDefinitions="*,Auto">
+              <StackPanel Orientation="Horizontal" Spacing="9" VerticalAlignment="Center">
+                <TextBlock Text="Activity log" FontSize="13" FontWeight="Bold" />
+                <TextBlock Text="Selected download" FontSize="10" Foreground="#8A94A7" VerticalAlignment="Center" />
+              </StackPanel>
+              <Button Grid.Column="1" Classes="quiet" Content="Copy log" MinHeight="28" Padding="9,4" Click="CopyLog_Click" />
+            </Grid>
+            <TextBox x:Name="LogBox" Grid.Row="1" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" FontFamily="Cascadia Mono, Consolas, monospace" FontSize="10.5" Background="#FAFBFD" BorderBrush="#EDF0F6" Padding="10" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Auto" />
+          </Grid>
+        </Border>
+      </Grid>
+    </Grid>
+
+    <!-- Status strip and toast -->
+    <Border Grid.Row="2" Background="#FFFFFF" BorderBrush="#E3E8F1" BorderThickness="0,1,0,0" Padding="24,9">
+      <Grid ColumnDefinitions="*,Auto">
+        <StackPanel Orientation="Horizontal" Spacing="9" VerticalAlignment="Center">
+          <Ellipse Width="6" Height="6" Fill="#24A579" VerticalAlignment="Center" />
+          <TextBlock x:Name="FooterStatusText" Text="Ready · paste a link to create a download" FontSize="10.5" Foreground="#68758B" VerticalAlignment="Center" />
+        </StackPanel>
+        <TextBlock Grid.Column="1" Text="FlickFetch 1.1.0  ·  Avalonia UI" FontSize="9.5" Foreground="#8D96A7" VerticalAlignment="Center" />
+      </Grid>
+    </Border>
+    <Border x:Name="ToastPanel" Grid.RowSpan="3" IsVisible="False" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,28,54" MaxWidth="360" Background="#20263A" CornerRadius="12" Padding="16,12" BoxShadow="0 8 30 0 #240B1738" ZIndex="1000">
+      <StackPanel Spacing="3">
+        <TextBlock x:Name="ToastTitle" Text="Added to queue" Foreground="#FFFFFF" FontSize="12" FontWeight="Bold" />
+        <TextBlock x:Name="ToastMessage" Text="Your item is ready." Foreground="#D5DBEA" FontSize="10.5" />
+      </StackPanel>
+    </Border>
+  </Grid>
+</Window>

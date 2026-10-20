@@ -1,0 +1,15 @@
+Downloading yt-dlp.exe
+Downloading SHA2-256SUMS
+Verified yt-dlp 2026.08.19 SHA-256.
+Downloading yt-dlp-LICENSE.txt
+Downloading yt-dlp-THIRD_PARTY_LICENSES.txt
+Downloading yt-dlp-2026.08.19.tar.gz
+Downloading ffmpeg-win64-gpl.zip
+Extracted FFmpeg and FFprobe from the GPL win64 build.
+Downloading FFmpeg-5993347a1b.tar.gz
+Downloading deno-windows-x64.zip
+Extracted Deno v2.9.7.
+Downloading Deno-LICENSE.md
+All bundled tools are staged in H:\CODES\flickfetch\Assets\BundledTools
+WARNING: The source archives and notices are helpful compliance material, but a redistributor must still verify exact 
+corresponding-source obligations for GPL components and all linked FFmpeg libraries.
