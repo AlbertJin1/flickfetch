@@ -1,14 +1,8 @@
-# Build and release output
-bin/
-obj/
-publish/
+node_modules/
+dist/
 release/
-
-# Downloaded third-party tools are staged by scripts/prepare-bundled-tools.ps1
-Assets/BundledTools/*.exe
-Assets/BundledTools/bundled-tools-manifest.txt
-THIRD-PARTY-FFMPEG-LICENSE.txt
-
-# Build-time license/source materials downloaded for a release
-third-party-licenses/*
-third-party-sources/*
+.DS_Store
+*.log
+.vscode/
+.env
+*.zip
