@@ -6,3 +6,4 @@ release/
 .vscode/
 .env
 *.zip
+publish/

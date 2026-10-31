@@ -1,18 +1,52 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, screen, safeStorage, protocol, session } = require('electron');
+const APP_ICON = require('node:path').join(__dirname, 'assets', process.platform === 'win32' ? 'icon.ico' : 'icon.png');
 const path = require('node:path');
 const fs = require('node:fs');
 const { ToolManager } = require('./services/tool-manager.cjs');
 const { DownloadService, PRESETS, isAcceptedUrl } = require('./services/download-service.cjs');
-const { fetchPlaylist, findPlaylistMatches } = require('./services/spotify-service.cjs');
+const { fetchPlaylist, findPlaylistMatches, buildQueueEntry } = require('./services/spotify-service.cjs');
+const { PreviewService, SCHEME: PREVIEW_SCHEME } = require('./services/preview-service.cjs');
+const { createRenderedSniffer } = require('./services/rendered-sniffer.cjs');
 const { spawn } = require('node:child_process');
 const os = require('node:os');
 const { parseLegacySettings } = require('./services/legacy-settings.cjs');
+const { loadWindowState, trackWindowState } = require('./services/window-state.cjs');
+const { MonitorService } = require('./services/monitor-service.cjs');
 
-// Preserve the original Windows data directory so existing helper binaries remain available.
+// Data location: ALWAYS %LOCALAPPDATA%\FlickFetch (settings, history, monitor state, helper tools, staged updates).
+// Nothing is written next to the exe. A "FlickFetch-Data" folder left beside the exe by v2.1.0 is migrated once.
+function isWritableDir(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const probe = path.join(dir, `.write-test-${process.pid}`);
+    fs.writeFileSync(probe, '');
+    fs.rmSync(probe, { force: true });
+    return true;
+  } catch { return false; }
+}
+
+function migrateLegacyPortableData(legacyDir, targetDir) {
+  try {
+    if (!legacyDir || !fs.existsSync(legacyDir) || !fs.statSync(legacyDir).isDirectory()) return;
+    // Copy only what the AppData folder does not already have, so an existing AppData install is never overwritten.
+    fs.cpSync(legacyDir, targetDir, { recursive: true, force: false, errorOnExist: false });
+    fs.rmSync(legacyDir, { recursive: true, force: true });
+  } catch { /* best effort: the app keeps working from AppData either way */ }
+}
+
 if (process.platform === 'win32') {
   const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-  app.setPath('userData', path.join(localAppData, 'FlickFetch'));
+  const appDataDir = path.join(localAppData, 'FlickFetch');
+  if (isWritableDir(appDataDir)) {
+    app.setPath('userData', appDataDir);
+    const portableDir = process.env.PORTABLE_EXECUTABLE_DIR;
+    if (portableDir) migrateLegacyPortableData(path.join(portableDir, 'FlickFetch-Data'), appDataDir);
+  }
 }
+
+// The in-app audio preview is served to a plain <audio> element through this scheme. It has to be registered as
+// privileged before the app is ready so Chromium treats it as a streamable media source (Range requests / seeking).
+protocol.registerSchemesAsPrivileged([{ scheme: PREVIEW_SCHEME, privileges: { standard: true, secure: true, stream: true } }]);
 
 const DEFAULT_SETTINGS = {
   outputDir: path.join(os.homedir(), 'Videos', 'FlickFetch'),
@@ -48,6 +82,7 @@ const DEFAULT_SETTINGS = {
   parallel: 2,
   extraArgs: '',
   autoStart: true,
+  inspectPages: true,
   watchClipboard: false,
   autoUpdate: true
 };
@@ -61,10 +96,14 @@ let settings = { ...DEFAULT_SETTINGS };
 let settingsFile;
 let tools;
 let downloads;
+let preview;
 let clipboardTimer;
 let lastClipboard = '';
 let matchOperation = 0;
 let matchController = null;
+let monitor;
+let quitAfterMonitorClose = false;
+let monitorClosePromise = null;
 
 function emit(channel, payload) {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -143,17 +182,23 @@ function showMainWindow() {
 function createWindow() {
   rendererReady = false;
   splashWindow = new BrowserWindow({
-    width: 600,
-    height: 410,
+    // 600x410 card + 36px transparent margin on every side so the rounded corners and soft shadow are never clipped.
+    width: 672,
+    height: 482,
     frame: false,
     transparent: true,
+    hasShadow: false,
+    thickFrame: false,
     resizable: false,
+    maximizable: false,
+    fullscreenable: false,
     movable: true,
     center: true,
     show: false,
     alwaysOnTop: true,
     skipTaskbar: true,
-    backgroundColor: '#07111e',
+    backgroundColor: '#00000000',
+    icon: APP_ICON,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true }
   });
   splashWindow.loadFile(path.join(__dirname, 'splash.html')).catch(error => {
@@ -161,13 +206,27 @@ function createWindow() {
   });
   splashWindow.once('ready-to-show', () => { if (splashWindow && !splashWindow.isDestroyed()) splashWindow.show(); });
 
+  // Restore the size/position the user last left the window at (validated against the currently connected displays).
+  const windowStateFile = path.join(app.getPath('userData'), 'window-state.json');
+  const MIN_WIDTH = 780;
+  const MIN_HEIGHT = 540;
+  const windowState = loadWindowState(windowStateFile, {
+    defaults: { width: 1460, height: 960 },
+    minWidth: MIN_WIDTH,
+    minHeight: MIN_HEIGHT,
+    displays: screen.getAllDisplays()
+  });
+
   mainWindow = new BrowserWindow({
-    width: 1460,
-    height: 960,
-    minWidth: 1060,
-    minHeight: 680,
+    width: windowState.width,
+    height: windowState.height,
+    ...(windowState.x !== undefined ? { x: windowState.x, y: windowState.y } : {}),
+    minWidth: MIN_WIDTH,
+    minHeight: MIN_HEIGHT,
+    frame: false,
     backgroundColor: '#f3f6f8',
     title: 'FlickFetch',
+    icon: APP_ICON,
     autoHideMenuBar: true,
     show: false,
     opacity: 0,
@@ -179,11 +238,16 @@ function createWindow() {
       webSecurity: true
     }
   });
+  if (windowState.maximized) mainWindow.maximize();
+  trackWindowState(mainWindow, windowStateFile, windowState);
+  mainWindow.on('maximize', () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('window:state-changed', { maximized: true }); });
+  mainWindow.on('unmaximize', () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('window:state-changed', { maximized: false }); });
   mainWindow.on('closed', () => { mainWindow = null; });
   mainWindow.webContents.on('did-fail-load', (_event, code, description) => {
     if (code !== -3) emit('app:log', { level: 'error', message: `The application view failed to load: ${description}` });
   });
-  if (!app.isPackaged) {
+  // The Vite dev server is used only when launched via `npm run dev` (which passes --dev). `npm start` and packaged builds load dist/.
+  if (!app.isPackaged && process.argv.includes('--dev')) {
     mainWindow.loadURL('http://127.0.0.1:5173').catch(error => {
       emit('app:log', { level: 'error', message: `Unable to load the development UI: ${error.message}` });
       showMainWindow();
@@ -243,10 +307,48 @@ async function inspectMedia(url, type) {
 
 function registerIpc() {
   ipcMain.on('app:renderer-ready', () => showMainWindow());
+  const resolveMainWindow = event => {
+    const senderWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!senderWindow || senderWindow !== mainWindow) throw new Error('Window controls are only available to the main application window.');
+    return senderWindow;
+  };
+  ipcMain.handle('window:minimize', event => {
+    resolveMainWindow(event).minimize();
+    return true;
+  });
+  ipcMain.handle('window:toggle-maximize', event => {
+    const win = resolveMainWindow(event);
+    if (win.isMaximized()) win.unmaximize();
+    else win.maximize();
+    return win.isMaximized();
+  });
+  ipcMain.handle('window:close', event => {
+    resolveMainWindow(event).close();
+    return true;
+  });
+  ipcMain.handle('window:is-maximized', event => resolveMainWindow(event).isMaximized());
   ipcMain.handle('app:get-info', async () => ({
     name: app.getName(), version: app.getVersion(), platform: `${process.platform}-${process.arch}`,
     packaged: app.isPackaged, userDataPath: app.getPath('userData')
   }));
+  ipcMain.handle('updater:check', async (_event, options) => monitor ? monitor.checkForUpdates(options || {}) : ({ supported: false, updateAvailable: false }));
+  ipcMain.handle('updater:install', async () => {
+    if (!monitor) throw new Error('The update service is not ready.');
+    const result = await monitor.downloadAndInstallUpdate();
+    // The detached PowerShell handoff waits for this process to exit before replacing the portable exe.
+    // Installed builds only download the verified release, so they keep running.
+    if (result?.restarting) app.quit();
+    return result;
+  });
+  ipcMain.handle('monitor:submit-review', async (_event, review) => {
+    if (!monitor) throw new Error('The review service is not ready.');
+    return monitor.submitReview(review || {});
+  });
+  // Automatic review prompt (same policy as PDF Studio: 30 minutes of use, paused after a review, snooze / opt-out).
+  ipcMain.handle('monitor:review-maybe-prompt', async () => monitor ? monitor.maybePromptReview() : ({ shouldPrompt: false, stopChecking: true }));
+  ipcMain.handle('monitor:review-prompt-shown', async () => monitor ? monitor.markReviewPromptShown() : false);
+  ipcMain.handle('monitor:review-defer', async (_event, choice) => monitor ? monitor.deferReview(choice) : false);
+  ipcMain.handle('monitor:review-identity', async () => monitor ? monitor.reviewIdentity() : ({ hostname: '', lastReviewAt: 0, reviewPending: false }));
   ipcMain.handle('app:open-external', async (_event, url) => shell.openExternal(ensureHttpUrl(url)));
   ipcMain.handle('app:open-path', async (_event, filePath) => {
     const target = String(filePath || '');
@@ -293,6 +395,7 @@ function registerIpc() {
 
   ipcMain.handle('tools:status', () => tools.getStatus());
   ipcMain.handle('tools:install', async (_event, selection) => tools.install(selection || {}));
+  ipcMain.handle('tools:check-update', () => tools.checkYtDlpUpdate());
   ipcMain.handle('tools:update-ytdlp', async () => {
     const output = await tools.updateYtDlp();
     return { output, status: await tools.getStatus() };
@@ -313,16 +416,29 @@ function registerIpc() {
   ipcMain.handle('downloads:get-log', (_event, id) => downloads.getLog(String(id)));
   ipcMain.handle('media:inspect', (_event, url, type) => inspectMedia(url, type));
 
+  ipcMain.handle('preview:prepare', (_event, url, options) => preview.prepare(String(url || ''), { fresh: Boolean(options?.fresh) }));
+  ipcMain.handle('preview:warm', (_event, url) => preview.warm(String(url || '')));
+
   ipcMain.handle('spotify:import', (_event, url) => fetchPlaylist(url));
-  ipcMain.handle('spotify:find-matches', async (_event, playlist) => {
+  ipcMain.handle('spotify:find-matches', async (_event, playlist, options = {}) => {
     matchController?.abort();
     const controller = new AbortController();
     matchController = controller;
     const operation = ++matchOperation;
+    const autoDownload = options?.autoDownload !== false;
+    // As soon as a CONFIDENT audio-only match is found for a track, queue it and start downloading right away.
+    const onConfident = autoDownload ? async (track, candidate) => {
+      if (operation !== matchOperation || controller.signal.aborted) return {};
+      try {
+        const [item] = downloads.add([buildQueueEntry(track, candidate, playlist.name)]);
+        downloads.start();
+        return { queued: true, downloadId: item?.id, queueError: '' };
+      } catch (error) { return { queued: false, queueError: error.message }; }
+    } : null;
     try {
       const result = await findPlaylistMatches(playlist, tools, (channel, payload) => {
         if (operation === matchOperation && !controller.signal.aborted) emit(channel, payload);
-      }, controller.signal);
+      }, controller.signal, { onConfident });
       if (operation !== matchOperation) throw new Error('A newer match search replaced this one.');
       return result;
     } finally {
@@ -334,7 +450,12 @@ function registerIpc() {
     matchController.abort();
     return true;
   });
-  ipcMain.handle('spotify:add-match', (_event, url, title) => downloads.add([{ url, title }]));
+  ipcMain.handle('spotify:add-match', (_event, candidate, track, playlistName) => {
+    if (!candidate?.url || !track) throw new Error('Choose a YouTube match first.');
+    const [item] = downloads.add([buildQueueEntry(track, candidate, playlistName)]);
+    downloads.start();
+    return item;
+  });
   ipcMain.handle('spotify:export-csv', async (_event, playlist) => {
     if (!playlist || !Array.isArray(playlist.tracks)) throw new Error('No playlist is available to export.');
     const result = await dialog.showSaveDialog(mainWindow, {
@@ -355,19 +476,36 @@ function registerIpc() {
   });
 }
 
-app.whenReady().then(() => {
+// Groups the taskbar button / jump list under FlickFetch's own identity (and lets the icon show correctly).
+if (process.platform === 'win32') app.setAppUserModelId('com.regualos.flickfetch');
+
+app.whenReady().then(async () => {
   settingsFile = path.join(app.getPath('userData'), 'settings.json');
   loadSettings();
   tools = new ToolManager(app.getPath('userData'), emit);
-  downloads = new DownloadService({ toolManager: tools, getSettings: () => settings, emit, userDataPath: app.getPath('userData') });
+  // Finds the real <video>/video/mp4 source behind pages yt-dlp has no extractor for (static HTML, then the live DOM).
+  const pageInspector = createRenderedSniffer({ electron: { BrowserWindow, session }, getSettings: () => settings, log: (level, message) => emit('app:log', { level, message }) });
+  downloads = new DownloadService({ toolManager: tools, getSettings: () => settings, emit, userDataPath: app.getPath('userData'), resolveMedia: (url, options) => pageInspector.resolve(url, options) });
+  preview = new PreviewService({
+    toolManager: tools, getSettings: () => settings,
+    cacheDir: path.join(app.getPath('userData'), 'preview-cache'),
+    log: (level, message) => emit('app:log', { level, message })
+  });
+  protocol.handle(PREVIEW_SCHEME, request => preview.handleRequest(request));
+  monitor = new MonitorService({ app, appVersion: app.getVersion(), userDataPath: app.getPath('userData'), emit, packaged: app.isPackaged, safeStorage });
+  await monitor.initialize();
   registerIpc();
   createWindow();
   watchClipboard();
-  if (settings.autoUpdate && tools.ytDlpPath && path.dirname(tools.ytDlpPath) === tools.binDir) {
+  if (app.isPackaged && process.platform === 'win32') {
+    setTimeout(() => monitor.checkForUpdates().catch(error => emit('app:log', { level: 'warn', message: `FlickFetch update check failed: ${error.message}` })), 1800);
+  }
+  if (settings.autoUpdate && tools.isManagedYtDlp()) {
     setTimeout(async () => {
       try {
         const output = await tools.updateYtDlp();
         emit('app:log', { level: 'info', message: `yt-dlp update check: ${output}` });
+        emit('tools:changed', {});
       } catch (error) { emit('app:log', { level: 'warn', message: `yt-dlp update check: ${error.message}` }); }
     }, 2200);
   }
@@ -377,7 +515,27 @@ app.whenReady().then(() => {
   app.quit();
 });
 
-app.on('before-quit', () => {
+app.on('will-quit', () => { try { preview?.clearCacheDir(); } catch { /* temp audio is also cleared on next start */ } });
+
+app.on('before-quit', event => {
+  if (!quitAfterMonitorClose && monitor) {
+    event.preventDefault();
+    if (!monitorClosePromise) {
+      monitorClosePromise = (async () => {
+        if (splashFallbackTimer) clearTimeout(splashFallbackTimer);
+        if (downloads) { downloads.stopAll(); downloads.flushPersist(); }
+        if (clipboardTimer) clearInterval(clipboardTimer);
+        await Promise.race([monitor.close(), new Promise(resolve => setTimeout(resolve, 4500))]);
+        quitAfterMonitorClose = true;
+        app.quit();
+      })().catch(error => {
+        console.warn('Monitor close handling failed:', error);
+        quitAfterMonitorClose = true;
+        app.quit();
+      });
+    }
+    return;
+  }
   if (splashFallbackTimer) clearTimeout(splashFallbackTimer);
   if (downloads) { downloads.stopAll(); downloads.flushPersist(); }
   if (clipboardTimer) clearInterval(clipboardTimer);

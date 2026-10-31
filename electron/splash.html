@@ -6,9 +6,12 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'" />
   <title>FlickFetch — Starting</title>
   <style>
+    @font-face { font-family: 'Bricolage Grotesque'; font-weight: 200 800; font-display: block; src: url('assets/fonts/bricolage-grotesque-latin-wght-normal.woff2') format('woff2'); }
+    @font-face { font-family: 'Instrument Sans'; font-weight: 400 700; font-display: block; src: url('assets/fonts/instrument-sans-latin-wght-normal.woff2') format('woff2'); }
     * { box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; font-family: Inter, "Segoe UI", sans-serif; color: #f6fbff; }
-    .frame { position: relative; width: 100%; height: 100%; overflow: hidden; border: 1px solid rgba(164, 218, 231, .18); border-radius: 25px; background: radial-gradient(circle at 80% 8%, rgba(30, 182, 163, .22), transparent 36%), radial-gradient(circle at 5% 100%, rgba(81, 111, 220, .24), transparent 44%), linear-gradient(145deg, #101c30 0%, #091525 58%, #07111e 100%); box-shadow: 0 28px 90px rgba(0, 0, 0, .45); }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; font-family: "Instrument Sans", "Segoe UI", sans-serif; color: #f6fbff; }
+    body { padding: 36px; }
+    .frame { position: relative; width: 100%; height: 100%; overflow: hidden; isolation: isolate; -webkit-app-region: drag; border: 1px solid rgba(164, 218, 231, .18); border-radius: 25px; background: radial-gradient(circle at 80% 8%, rgba(30, 182, 163, .22), transparent 36%), radial-gradient(circle at 5% 100%, rgba(81, 111, 220, .24), transparent 44%), linear-gradient(145deg, #101c30 0%, #091525 58%, #07111e 100%); box-shadow: 0 14px 30px rgba(0, 0, 0, .38); }
     .grain { position: absolute; inset: 0; opacity: .12; pointer-events: none; background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.22'/%3E%3C/svg%3E"); }
     .glow { position: absolute; width: 290px; height: 290px; right: -70px; top: -95px; border-radius: 50%; background: rgba(48, 221, 190, .10); filter: blur(16px); animation: breathe 5s ease-in-out infinite; }
     .content { position: relative; z-index: 2; display: flex; height: 100%; flex-direction: column; align-items: center; justify-content: center; padding: 36px 46px 31px; }
@@ -16,6 +19,7 @@
     .mark-ring { position: absolute; inset: 0; border: 1px solid rgba(91, 229, 201, .36); border-radius: 26px; transform: rotate(45deg); animation: ring 8s linear infinite; }
     .mark { position: relative; display: grid; width: 66px; height: 66px; place-items: center; overflow: hidden; border: 1px solid rgba(255,255,255,.23); border-radius: 20px; background: linear-gradient(140deg, #4be1c3, #1aa58f 54%, #6075e8); color: #082126; font-size: 35px; font-weight: 950; letter-spacing: -.09em; box-shadow: 0 12px 35px rgba(37, 200, 174, .24), inset 0 1px rgba(255,255,255,.48); }
     .mark:after { position: absolute; width: 90px; height: 18px; content: ''; background: rgba(255,255,255,.26); transform: rotate(-45deg) translateY(-20px); animation: sheen 3s ease-in-out infinite; }
+    h1, .mark { font-family: 'Bricolage Grotesque', 'Instrument Sans', sans-serif; }
     h1 { margin: 0; font-size: 29px; line-height: 1; font-weight: 800; letter-spacing: -.055em; }
     .tagline { margin-top: 10px; color: #93a9bc; font-size: 10px; font-weight: 700; letter-spacing: .24em; }
     .loading { display: flex; width: 100%; max-width: 340px; flex-direction: column; gap: 10px; margin-top: 43px; }

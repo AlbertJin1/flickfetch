@@ -1,4 +1,5 @@
 import React from 'react';
+import DropdownSelect from './DropdownSelect.jsx';
 import { AlertCircle, Check, CheckCircle2, Info, X } from 'lucide-react';
 
 export function ProgressBar({ value, className = '', indeterminate = false }) {
@@ -91,6 +92,6 @@ export function Field({ label, value, onChange, placeholder, type = 'text', hint
   return <label className="block"><span className="field-label">{label}</span><input className="field-control" type={type} value={value ?? ''} placeholder={placeholder} onChange={event => onChange?.(event.target.value)} {...props} />{hint && <span className="mt-1 block text-[9px] leading-relaxed text-slate-400">{hint}</span>}</label>;
 }
 
-export function SelectField({ label, value, onChange, options, hint }) {
-  return <label className="block"><span className="field-label">{label}</span><select className="field-control" value={value} onChange={event => onChange?.(event.target.value)}>{options.map(option => <option key={String(option.value)} value={option.value}>{option.label}</option>)}</select>{hint && <span className="mt-1 block text-[9px] text-slate-400">{hint}</span>}</label>;
+export function SelectField({ label, value, onChange, options, hint, disabled = false }) {
+  return <div className="block min-w-0"><label className="field-label">{label}</label><DropdownSelect value={value} onChange={onChange} options={options} disabled={disabled} ariaLabel={label} />{hint && <span className="mt-1 block text-[9px] text-slate-400">{hint}</span>}</div>;
 }

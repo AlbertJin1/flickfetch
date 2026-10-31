@@ -26,6 +26,7 @@
 
 - Paste one or multiple media links, one link per line; `Ctrl + Enter` adds them to the queue. Drag URL text or `.txt` / `.url` link-list files onto the app to import them too.
 - Add supported URLs and yt-dlp search expressions.
+- Pages yt-dlp does not support are inspected for their real video (`<video><source type="video/mp4">`, `og:video`, HLS/DASH manifests, nested player iframes, and players built by JavaScript), the source is verified with the right Referer, and then downloaded. Controlled by **Find video on unsupported pages** in Settings.
 - Queue items retain a snapshot of the options selected when they were added.
 - Queue controls: pause/resume new queue processing, stop all, cancel one task, retry failed/canceled tasks, remove finished tasks, and clear finished items.
 - Concurrent downloads with configurable concurrency, fragment count, retries, and speed limit.
@@ -51,13 +52,15 @@
 - Search YouTube through yt-dlp for up to ten candidates per track.
 - Rank suggestions using title/artist token overlap, duration similarity, and signals such as Topic channels, official-audio labels, live versions, and music-video labels.
 - Review and choose among candidate results, open the Spotify/YouTube source, and add an individual reviewed match to the normal download queue.
+- **Preview** any candidate audio-only inside the app (play/pause, seek, volume) before downloading. The preview uses yt-dlp to resolve an audio stream and does not open a browser or embed YouTube's web player.
 - Export playlist and suggestion data to CSV.
 
 Match scores are **heuristic suggestions**, not proof that two links contain the same recording. The application does not automatically bulk-download a Spotify playlist. Private playlists, tracks not exposed by the public embed, and changes to Spotify's unofficial embed format may prevent import.
 
 ### Settings and tools
 
-- Settings are stored as JSON in the per-user application data directory. On Windows, FlickFetch reuses the original `%LOCALAPPDATA%\FlickFetch` directory and imports legacy `settings.ini` values into `settings.json` on first launch, preserving the existing `bin` folder and helper executables.
+- **Portable build:** when run from the single-file portable exe (`publish\FlickFetch.exe`), all data (settings, history, and the downloaded yt-dlp/FFmpeg/Deno tools) is stored in `%LOCALAPPDATA%\FlickFetch`; nothing is created next to the exe. A `FlickFetch-Data` folder left by older versions is migrated automatically.
+- Otherwise, settings are stored as JSON in the per-user application data directory. On Windows, FlickFetch reuses the original `%LOCALAPPDATA%\FlickFetch` directory and imports legacy `settings.ini` values into `settings.json` on first launch, preserving the existing `bin` folder and helper executables.
 - Optional clipboard monitoring detects copied media links and asks before adding them; it does not start a download without user action.
 - On Windows x64, the Tools page can install/repair yt-dlp, FFmpeg/FFprobe, and Deno into the app's user-data `bin` folder.
 - The yt-dlp executable is installed only after its SHA-256 value matches the official `SHA2-256SUMS` file.
@@ -115,3 +118,34 @@ FlickFetch is independent and is not affiliated with, endorsed by, or sponsored 
 ## Licensing
 
 The original FlickFetch application UI and integration code are attributed to Jessie Albert Regualos. Third-party libraries, executables, trademarks, platform services, and content retain their own copyrights and licenses. Review [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) and the upstream licenses for the exact versions bundled or installed before redistribution. The FFmpeg build selected by the Windows installer is a GPL build; verify applicable source and redistribution obligations before publishing a packaged release.
+
+## Universal App Monitor integration
+
+FlickFetch is registered as its own `flickfetch` application in the Universal App Monitor. Packaged builds send an installation-scoped open/heartbeat/close session, check for releases, and can submit a 1–5 star review with optional written feedback. Monitor identity is stored in `monitor-state.json` alongside the portable data folder. Reviews and device activity are tagged as FlickFetch and remain separate from PDF Studio records.
+
+The desktop client uses the public, allow-listed HTTPS client gateway. **No Monitor API key is embedded in FlickFetch.** The Monitor server must keep `MONITOR_API_KEY` in its server environment/private config. The release workstation uses its separate publishing key through `FLICKFETCH_MONITOR_KEY`, `MONITOR_API_KEY`, or a `monitor-key.txt` file beside `publish_to_monitor.ps1`. Run `release.bat [auto|public|local] [-Force] [-NoZip]` (or `release.bat noupload` to build only); `auto` tries the LAN Monitor first, then the public URL. Review submissions are associated with the app version, device name, operating system, local IP address, and a stable installation ID.
+
+### Deploying the Monitor changes
+
+1. Deploy the updated Universal App Monitor project, including `src/apps.php`, `src/releases.php`, `public/api/client-gateway.php`, and `public/reviews.php`.
+2. Ensure the server has its existing strong `MONITOR_API_KEY` configured. Keep it server-side; never copy it into FlickFetch or the public web directory.
+3. Check that `flickfetch` appears in the Monitor application selector and that the Releases and Reviews pages accept `?app=flickfetch`.
+4. Keep the client gateway's upstream base URL on the Monitor's HTTPS API. The shipped default points to the same `pdfstudio-monitor` deployment used by PDF Studio; set the server-side `PDFSTUDIO_MONITOR_API_BASE` only when your deployment uses a different internal upstream.
+
+### Building and publishing FlickFetch
+
+Set the publishing key once on the Windows release workstation (open a new terminal after setting it):
+
+```powershell
+[Environment]::SetEnvironmentVariable('FLICKFETCH_MONITOR_KEY', 'YOUR_MONITOR_PUBLISHING_KEY', 'User')
+```
+
+Optional base URL override:
+
+```powershell
+[Environment]::SetEnvironmentVariable('FLICKFETCH_MONITOR_URL', 'https://your-host/your-monitor-base', 'User')
+```
+
+Run `release.bat` to build the portable Windows x64 executable and publish it to the monitor. Use `release.bat noupload` to build without uploading, or `release.bat -Force` to replace an identical version when the monitor allows it. The publisher reads the executable's product/version metadata and the matching `CHANGELOG.md` section, creates a compressed ZIP package, verifies SHA-256 values, and uploads in resumable 4 MiB chunks. The Monitor then stores the canonical executable, ZIP cache, and differential-update manifest.
+
+In-app replacement is enabled only for the **Windows portable executable** created by `build_publish.bat`; installed builds are not silently replaced in protected install folders. The updater first requests missing content-defined chunks when a compatible differential manifest exists, otherwise downloads the verified ZIP (or legacy raw executable), checks the final executable size and SHA-256, and stages a rollback-capable replacement. The AppData folder, user settings, download history, and installed helper tools are preserved.

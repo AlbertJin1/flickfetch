@@ -1,9 +1,56 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { CheckCircle2, Disc3, ExternalLink, FileSpreadsheet, Headphones, Loader2, Music2, PlayCircle, Search, Sparkles, Youtube } from 'lucide-react';
+import {
+  AlertTriangle, CheckCircle2, Download, ExternalLink, FileSpreadsheet, Headphones, Info, Link2, ListMusic, Loader2,
+  Music2, PauseCircle, PlayCircle, Search, SearchX, Wand2, X
+} from 'lucide-react';
 import { formatDuration } from '../lib/format.js';
-import { Notice, ProgressBar, SectionHeading, StatCard } from './Primitives.jsx';
+import { usePreviewPlayer } from '../lib/preview-player.jsx';
+import DropdownSelect from './DropdownSelect.jsx';
+import { FilterTabs, Meter, Stepper, SwitchChip } from './ui.jsx';
 
-export default function SpotifyWorkspace({ initialRequest, toolStatus, onToast, onOpenDownloads }) {
+const STEPS = [
+  { label: 'Import playlist', hint: 'Paste a Spotify link' },
+  { label: 'Find audio', hint: 'Match each song' },
+  { label: 'Review & download', hint: 'Check the results' }
+];
+
+/** One song, one state. Everything in the UI is derived from this. */
+const stateOf = track => {
+  if (track.queued) return 'queued';
+  if (track.bestMatch) return 'ready';
+  if (track.candidates?.length) return 'review';
+  if (track.matchStatus === 'Failed' || track.matchStatus === 'Needs review') return 'nomatch';
+  return 'pending';
+};
+
+const strength = score => (score >= 80 ? ['Strong match', 'is-strong'] : score >= 62 ? ['Likely match', 'is-likely'] : ['Weak match', 'is-weak']);
+const youtubeSearchUrl = track => `https://www.youtube.com/results?search_query=${encodeURIComponent(`${track.artist} ${track.title} audio`)}`;
+
+/** Label + icon for a row's Preview button, derived from the shared player state. */
+function previewButtonState(player, key) {
+  const active = player.track?.key === key;
+  const status = active ? player.status : 'idle';
+  if (status === 'loading') return { Icon: Loader2, spin: true, label: 'Loading…', title: 'Cancel this preview', active };
+  if (status === 'playing' || status === 'buffering') return { Icon: PauseCircle, label: 'Pause', title: 'Pause the preview', active };
+  if (status === 'paused') return { Icon: PlayCircle, label: 'Resume', title: 'Resume the preview', active };
+  if (status === 'ended') return { Icon: PlayCircle, label: 'Replay', title: 'Play the preview again', active };
+  if (status === 'error') return { Icon: PlayCircle, label: 'Retry', title: 'Try the preview again', active };
+  return { Icon: PlayCircle, label: 'Preview', title: 'Listen to this version here in FlickFetch', active: false };
+}
+
+function TrackStatus({ state }) {
+  const map = {
+    queued: ['Downloading', 'queued', CheckCircle2],
+    ready: ['Ready', 'ready', CheckCircle2],
+    review: ['Needs review', 'review', AlertTriangle],
+    nomatch: ['No match', 'nomatch', SearchX],
+    pending: ['Waiting', 'pending', null]
+  };
+  const [label, tone, Icon] = map[state];
+  return <span className={`ff-badge ff-badge-sp-${tone}`}>{Icon ? <Icon size={13} aria-hidden="true" /> : <i aria-hidden="true" />}{label}</span>;
+}
+
+export default function SpotifyWorkspace({ initialRequest, toolStatus, onToast, onOpenDownloads, onOpenSettings }) {
   const [url, setUrl] = useState('');
   const [playlist, setPlaylist] = useState(null);
   const [importing, setImporting] = useState(false);
@@ -13,27 +60,46 @@ export default function SpotifyWorkspace({ initialRequest, toolStatus, onToast, 
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
   const [selectedMatches, setSelectedMatches] = useState({});
+  const [openPickers, setOpenPickers] = useState({});
   const [busyTrack, setBusyTrack] = useState(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [autoDownload, setAutoDownload] = useState(true);
   const lastRequestSequence = useRef(0);
+  const listTopRef = useRef(null);
+  const player = usePreviewPlayer();
 
   useEffect(() => window.flickfetch.on.spotifyProgress(payload => {
     setProgress({ current: payload.current, total: payload.total, trackTitle: payload.trackTitle, status: payload.status });
     if (payload.track) setPlaylist(current => current ? ({ ...current, tracks: current.tracks.map(track => track.number === payload.track.number ? payload.track : track) }) : current);
   }), []);
 
-  const matchedCount = playlist?.tracks.filter(track => track.candidates?.length).length || 0;
-  const failedCount = playlist?.tracks.filter(track => track.matchStatus === 'Failed' || (track.matchStatus && track.matchStatus !== 'Matched' && track.matchStatus !== 'Waiting for search')).length || 0;
-  const filteredTracks = useMemo(() => (playlist?.tracks || []).filter(track => {
-    if (filter === 'matched' && !track.candidates?.length) return false;
-    if (filter === 'unmatched' && track.candidates?.length) return false;
-    return !search || `${track.title} ${track.artist} ${track.album}`.toLowerCase().includes(search.toLowerCase());
-  }), [playlist, filter, search]);
+  const tracks = playlist?.tracks || [];
+  const counts = useMemo(() => {
+    const result = { all: tracks.length, queued: 0, ready: 0, review: 0, nomatch: 0, pending: 0 };
+    for (const track of tracks) result[stateOf(track)] += 1;
+    return result;
+  }, [tracks]);
+  const searched = tracks.length - counts.pending;
+  const hasResults = searched > 0;
+  const needAttention = counts.review + counts.nomatch;
+  const step = !playlist ? 0 : (matching || hasResults) ? 2 : 1;
+  const engineReady = Boolean(toolStatus?.ytDlp?.installed);
+
+  const filteredTracks = useMemo(() => {
+    const needle = search.trim().toLowerCase();
+    return tracks.filter(track => {
+      const state = stateOf(track);
+      if (filter === 'attention' ? !(state === 'review' || state === 'nomatch') : filter !== 'all' && state !== filter) return false;
+      return !needle || `${track.title} ${track.artist} ${track.album}`.toLowerCase().includes(needle);
+    });
+  }, [tracks, filter, search]);
 
   const importPlaylist = async (sourceUrl = url) => {
-    const playlistUrl = String(sourceUrl || '').trim();
+    // Only accept a real string: a click handler must never leak its event object in here.
+    const playlistUrl = (typeof sourceUrl === 'string' ? sourceUrl : url).trim();
     if (!playlistUrl) return;
     setUrl(playlistUrl);
-    setImporting(true); setError(''); setPlaylist(null); setSelectedMatches({});
+    setImporting(true); setError(''); setPlaylist(null); setSelectedMatches({}); setOpenPickers({}); setFilter('all'); setSearch('');
     try {
       const result = await window.flickfetch.spotify.importPlaylist(playlistUrl);
       setPlaylist(result); setProgress({ current: 0, total: result.tracks.length, trackTitle: '', status: '' });
@@ -47,35 +113,57 @@ export default function SpotifyWorkspace({ initialRequest, toolStatus, onToast, 
       lastRequestSequence.current = initialRequest.sequence;
       void importPlaylist(initialRequest.url);
     }
-  }, [initialRequest?.sequence]);
+  }, [initialRequest?.sequence]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const changePlaylist = () => {
+    if (matching) return;
+    setPlaylist(null); setError(''); setSelectedMatches({}); setOpenPickers({}); setFilter('all'); setSearch('');
+  };
 
   const findMatches = async () => {
     if (!playlist) return;
     setMatching(true); setError(''); setSelectedMatches({});
-    setProgress({ current: 0, total: playlist.tracks.length, trackTitle: 'Preparing YouTube searches…', status: '' });
+    setProgress({ current: 0, total: playlist.tracks.length, trackTitle: 'Starting search…', status: '' });
     try {
-      const result = await window.flickfetch.spotify.findMatches(playlist);
+      const result = await window.flickfetch.spotify.findMatches(playlist, { autoDownload });
       setPlaylist(result);
-      setProgress({ current: result.tracks.filter(track => track.candidates?.length || track.matchStatus === 'Failed').length, total: result.tracks.length, trackTitle: result.canceled ? 'Matching canceled' : 'Matching finished', status: '' });
-      onToast?.(result.canceled ? 'info' : 'success', result.canceled ? 'Match search canceled' : 'YouTube review is ready', result.canceled ? 'Completed suggestions were kept. You can resume by searching again.' : 'Check each suggestion before adding it to the download queue.');
+      const queued = result.tracks.filter(track => track.queued).length;
+      const review = result.tracks.filter(track => !track.bestMatch && !track.queued).length;
+      setProgress({ current: result.tracks.filter(track => track.candidates?.length || track.matchStatus === 'Failed' || track.queued).length, total: result.tracks.length, trackTitle: result.canceled ? 'Search canceled' : 'Search finished', status: '' });
+      onToast?.(result.canceled ? 'info' : 'success', result.canceled ? 'Search canceled' : (autoDownload ? `${queued} song${queued === 1 ? '' : 's'} downloading` : 'Matches are ready'), result.canceled ? 'Finished songs were kept. Search again to continue with the rest.' : (review ? `${review} song${review === 1 ? '' : 's'} need a quick look below.` : 'Every song found a confident match.'));
+      if (!result.canceled && review) setFilter('attention');
     } catch (exception) { setError(exception.message); }
     finally { setMatching(false); }
   };
 
   const selectedCandidate = track => {
     const urlValue = selectedMatches[track.number];
-    return track.candidates?.find(candidate => candidate.url === urlValue) || track.bestMatch || track.candidates?.[0] || null;
+    return track.candidates?.find(candidate => candidate.url === urlValue) || track.bestMatch || track.candidates?.find(candidate => !candidate.rejected) || track.candidates?.[0] || null;
+  };
+
+  const queueTrack = async track => {
+    const candidate = selectedCandidate(track);
+    if (!candidate?.url) return false;
+    await window.flickfetch.spotify.addMatch(candidate, track, playlist?.name);
+    setPlaylist(current => current ? ({ ...current, tracks: current.tracks.map(entry => entry.number === track.number ? { ...entry, queued: true } : entry) }) : current);
+    return true;
   };
 
   const addMatch = async track => {
-    const candidate = selectedCandidate(track);
-    if (!candidate?.url) return;
     setBusyTrack(track.number);
-    try {
-      await window.flickfetch.spotify.addMatch(candidate.url, `${track.artist} - ${track.title}`);
-      onToast?.('success', 'Added to download queue', track.title);
-    } catch (exception) { onToast?.('error', 'Could not add match', exception.message); }
+    try { if (await queueTrack(track)) onToast?.('success', 'Download started', track.title); }
+    catch (exception) { onToast?.('error', 'Could not add this song', exception.message); }
     finally { setBusyTrack(null); }
+  };
+
+  const downloadReady = async () => {
+    const targets = tracks.filter(track => stateOf(track) === 'ready');
+    if (!targets.length) return;
+    setBulkBusy(true);
+    let added = 0;
+    try { for (const track of targets) { try { if (await queueTrack(track)) added += 1; } catch { /* keep going; failures stay visible in the list */ } } }
+    finally { setBulkBusy(false); }
+    onToast?.(added === targets.length ? 'success' : 'warning', `${added} song${added === 1 ? '' : 's'} downloading`, added === targets.length ? 'You can follow progress in Downloads.' : `${targets.length - added} could not be added. Try them one by one.`);
   };
 
   const exportCsv = async () => {
@@ -91,42 +179,187 @@ export default function SpotifyWorkspace({ initialRequest, toolStatus, onToast, 
     catch (exception) { onToast?.('error', 'Could not open link', exception.message); }
   };
 
+  const showAttention = () => { setFilter('attention'); setSearch(''); listTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); };
+
+  const tabs = [
+    { value: 'all', label: 'All', count: counts.all },
+    { value: 'queued', label: 'Downloading', count: counts.queued },
+    { value: 'ready', label: 'Ready', count: counts.ready },
+    { value: 'attention', label: 'Needs attention', count: needAttention },
+    { value: 'pending', label: 'Not searched', count: counts.pending }
+  ].filter(tab => tab.value === 'all' || tab.count > 0 || filter === tab.value);
+
   return (
-    <div className="scrollbar-thin h-full overflow-y-auto px-7 pb-8 pt-6">
-      <SectionHeading eyebrow="Playlist review" title="Spotify playlist matcher" description="Import a public playlist, search for audio-first YouTube candidates, and review each suggested match." right={<div className="flex items-center gap-2 rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 text-[10px] font-semibold text-emerald-700"><Music2 size={14} /> Public embed · No Spotify sign-in</div>} />
+    <div className="ff-page scrollbar-thin">
+      <div className="ff-page-inner">
+        <header className="ff-page-head">
+          <h1>Spotify matcher</h1>
+          <p>Turn a public Spotify playlist into audio files. FlickFetch finds the studio version of each song and downloads it for you.</p>
+        </header>
 
-      <div className="panel mb-5 overflow-hidden">
-        <div className="flex items-center gap-3 border-b border-slate-100 px-5 py-4"><div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600"><Disc3 size={18} /></div><div><div className="text-[13px] font-bold text-slate-900">Import playlist metadata</div><div className="mt-0.5 text-[10px] text-slate-400">Paste a Spotify playlist link. Only publicly exposed playlist information is supported.</div></div></div>
-        <div className="p-5"><label className="field-label">Spotify playlist URL</label><div className="flex gap-2"><input className="field-control min-w-0 flex-1" value={url} onChange={event => setUrl(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') importPlaylist(); }} placeholder="https://open.spotify.com/playlist/…" /><button className="btn-primary shrink-0" disabled={!url.trim() || importing} onClick={importPlaylist}>{importing ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />}{importing ? 'Reading playlist…' : 'Import playlist'}</button></div>
-          <div className="mt-3 flex items-start gap-2 rounded-xl bg-slate-50 px-3 py-2.5 text-[9px] leading-relaxed text-slate-500"><Sparkles size={13} className="mt-0.5 shrink-0 text-emerald-600" /><span>FlickFetch reads the public Spotify embed page; it does not use an API key, OAuth flow, or Spotify account login. Private playlists and some tracks may not be visible through this public surface.</span></div>
-        </div>
+        <Stepper steps={STEPS} current={step} />
+
+        {error && (
+          <div className="ff-inline-note ff-note-error" role="alert"><AlertTriangle size={16} aria-hidden="true" /><span><b>Something went wrong.</b> {error}</span><button type="button" className="ff-icon-btn" aria-label="Dismiss" onClick={() => setError('')}><X size={15} /></button></div>
+        )}
+
+        {!playlist ? (
+          <section className="ff-card ff-import" aria-label="Import a playlist">
+            <div className="ff-import-icon"><Link2 size={22} aria-hidden="true" /></div>
+            <h2>Paste your playlist link</h2>
+            <p>In Spotify, open the playlist, choose <b>Share</b>, then <b>Copy link to playlist</b>.</p>
+            <form className="ff-import-form" onSubmit={event => { event.preventDefault(); importPlaylist(); }}>
+              <input value={url} onChange={event => setUrl(event.target.value)} placeholder="https://open.spotify.com/playlist/…" aria-label="Spotify playlist link" spellCheck={false} autoFocus />
+              <button type="submit" className="ff-btn ff-btn-primary ff-btn-lg" disabled={!url.trim() || importing}>
+                {importing ? <><Loader2 size={17} className="animate-spin" aria-hidden="true" />Reading playlist…</> : <><ListMusic size={17} aria-hidden="true" />Import playlist</>}
+              </button>
+            </form>
+            <ul className="ff-import-facts">
+              <li><CheckCircle2 size={15} aria-hidden="true" />No Spotify login or API key needed</li>
+              <li><CheckCircle2 size={15} aria-hidden="true" />Public playlists only</li>
+              <li><CheckCircle2 size={15} aria-hidden="true" />Nothing downloads until you start the search</li>
+            </ul>
+          </section>
+        ) : (
+          <>
+            <section className="ff-card ff-playlist" aria-label="Imported playlist">
+              <div className="ff-playlist-cover" aria-hidden="true"><Music2 size={24} /></div>
+              <div className="ff-playlist-copy">
+                <h2 title={playlist.name}>{playlist.name}</h2>
+                <p>{[playlist.owner, `${tracks.length} songs`].filter(Boolean).join(' · ')}</p>
+              </div>
+              <div className="ff-playlist-actions">
+                <button type="button" className="ff-link" onClick={() => openLink(playlist.url)}><ExternalLink size={14} aria-hidden="true" />Open in Spotify</button>
+                <button type="button" className="ff-btn ff-btn-ghost" onClick={exportCsv}><FileSpreadsheet size={15} aria-hidden="true" />Export CSV</button>
+                <button type="button" className="ff-btn ff-btn-ghost" onClick={changePlaylist} disabled={matching}>Use another playlist</button>
+              </div>
+            </section>
+
+            {matching ? (
+              <section className="ff-card ff-run" aria-live="polite">
+                <div className="ff-run-top">
+                  <div><h2>Finding audio versions</h2><p>{progress.trackTitle || 'Searching…'}</p></div>
+                  <div className="ff-run-count"><b>{progress.current}</b><span>of {progress.total}</span></div>
+                </div>
+                <Meter value={progress.total ? progress.current / progress.total * 100 : 0} />
+                <div className="ff-run-foot">
+                  <span>{autoDownload ? `${counts.queued} downloading so far · ${needAttention} need review` : `${counts.ready} matched so far · ${needAttention} need review`}</span>
+                  <button type="button" className="ff-btn ff-btn-danger-quiet" onClick={() => window.flickfetch.spotify.cancelMatches()}><X size={15} aria-hidden="true" />Cancel search</button>
+                </div>
+              </section>
+            ) : !hasResults ? (
+              <section className="ff-card ff-start">
+                <div className="ff-start-copy">
+                  <h2>Ready to match {tracks.length} songs</h2>
+                  <p>For each song, FlickFetch looks for the original studio audio. Music videos, live versions, remixes and covers are skipped.</p>
+                  <SwitchChip checked={autoDownload} onChange={setAutoDownload} label="Start downloading as soon as a confident match is found" />
+                </div>
+                <div className="ff-start-cta">
+                  <button type="button" className="ff-btn ff-btn-primary ff-btn-xl" onClick={findMatches} disabled={!engineReady}>
+                    <Wand2 size={18} aria-hidden="true" />{autoDownload ? 'Find & download songs' : 'Find matches'}
+                  </button>
+                  {!engineReady && <p className="ff-warn-text"><AlertTriangle size={14} aria-hidden="true" />The download engine isn’t installed yet. <button type="button" className="ff-link" onClick={onOpenSettings}>Open Settings</button> to install it.</p>}
+                </div>
+              </section>
+            ) : (
+              <section className="ff-card ff-summary" aria-label="Results summary">
+                <div className="ff-summary-stats">
+                  <div className="is-good"><b>{counts.queued + counts.ready}</b><span>{counts.queued ? 'matched' : 'ready'}</span></div>
+                  <div className={needAttention ? 'is-warn' : ''}><b>{needAttention}</b><span>need attention</span></div>
+                  {counts.pending > 0 && <div><b>{counts.pending}</b><span>not searched</span></div>}
+                </div>
+                <div className="ff-summary-actions">
+                  {counts.ready > 0 && <button type="button" className="ff-btn ff-btn-primary ff-btn-lg" onClick={downloadReady} disabled={bulkBusy}>{bulkBusy ? <Loader2 size={17} className="animate-spin" aria-hidden="true" /> : <Download size={17} aria-hidden="true" />}Download {counts.ready} ready song{counts.ready === 1 ? '' : 's'}</button>}
+                  {needAttention > 0 && <button type="button" className={`ff-btn ${counts.ready > 0 ? 'ff-btn-ghost' : 'ff-btn-primary ff-btn-lg'}`} onClick={showAttention}><Headphones size={16} aria-hidden="true" />Review {needAttention} song{needAttention === 1 ? '' : 's'}</button>}
+                  {counts.queued > 0 && <button type="button" className="ff-btn ff-btn-ghost" onClick={onOpenDownloads}>See progress in Downloads</button>}
+                  {(counts.pending > 0 || counts.nomatch > 0) && <button type="button" className="ff-btn ff-btn-ghost" onClick={findMatches} disabled={!engineReady}><Search size={15} aria-hidden="true" />Search again</button>}
+                </div>
+              </section>
+            )}
+
+            <section className="ff-tracks" aria-label="Songs" ref={listTopRef}>
+              <div className="ff-tracks-bar">
+                {tabs.length > 1 ? <FilterTabs label="Filter songs" value={filter} onChange={setFilter} tabs={tabs} /> : <h2 className="ff-tracks-title">Songs <span>{tracks.length}</span></h2>}
+                <label className="ff-search"><Search size={15} aria-hidden="true" /><input value={search} onChange={event => setSearch(event.target.value)} placeholder="Search songs" aria-label="Search songs" /></label>
+              </div>
+
+              {filteredTracks.length ? (
+                <ul className="ff-list">
+                  {filteredTracks.map(track => {
+                    const state = stateOf(track);
+                    const candidate = selectedCandidate(track);
+                    const hasCandidates = Boolean(track.candidates?.length);
+                    const pickerOpen = state === 'review' || openPickers[track.number];
+                    const [strengthLabel, strengthTone] = strength(candidate?.score);
+                    const plain = !hasResults && !matching;
+                    const showPicker = pickerOpen && hasCandidates && state !== 'queued';
+                    const cleanLabel = candidate?.matchLabel ? candidate.matchLabel.replace(/^(Confident|Review|Skipped) · /, '') : '';
+                    const meta = state === 'review' ? cleanLabel : candidate?.channel;
+                    const previewKey = candidate?.url ? `${track.number}:${candidate.url}` : '';
+                    const previewUi = previewButtonState(player, previewKey);
+                    return (
+                      <li key={track.number} className={`ff-track is-${state} ${plain ? 'is-plain' : ''} ${previewUi.active ? 'is-previewing' : ''}`}>
+                        <span className="ff-track-num" aria-label={`Song ${track.number}`}>{track.number}</span>
+                        <div className="ff-track-main">
+                          <span className="ff-track-title">{track.title}</span>
+                          <span className="ff-track-sub">{[track.artist, track.album, formatDuration(track.durationMilliseconds)].filter(value => value && value !== '—').join(' · ')}</span>
+                        </div>
+
+                        {!plain && (
+                          <div className="ff-track-match">
+                            {state === 'queued' && candidate ? (
+                              <div className="ff-match-inline"><TrackStatus state={state} /><span className="ff-candidate-title" title={candidate.title}>{candidate.title}</span></div>
+                            ) : (
+                              <>
+                                <div className="ff-track-status"><TrackStatus state={state} /></div>
+                                {hasCandidates && candidate && !showPicker && <span className="ff-candidate-title" title={candidate.title}>{candidate.title}</span>}
+                                {showPicker && (
+                                  <div className="ff-picker">
+                                    <DropdownSelect className="ff-picker-select" ariaLabel={`Choose a version of ${track.title}`} value={candidate?.url || ''} onChange={value => setSelectedMatches(current => ({ ...current, [track.number]: value }))}
+                                      options={track.candidates.map((item, index) => ({ value: item.url, label: `${index + 1}. ${item.title}${item.rejected ? ' (skipped)' : ''}` }))} />
+                                  </div>
+                                )}
+                                {hasCandidates && candidate && <span className="ff-candidate-meta"><span className={`ff-strength ${strengthTone}`}>{strengthLabel}</span>{meta ? ` · ${meta}` : ''}</span>}
+                                {!hasCandidates && state === 'nomatch' && <span className="ff-candidate-meta">{track.matchError || track.queueError || 'No confident studio version was found for this song.'}</span>}
+                              </>
+                            )}
+                            {track.queueError && hasCandidates && <span className="ff-candidate-error">{track.queueError}</span>}
+                          </div>
+                        )}
+
+                        {!plain && (
+                          <div className="ff-track-actions">
+                            {hasCandidates && state !== 'queued' && (
+                              <>
+                                <button type="button" className="ff-btn ff-btn-primary" disabled={busyTrack === track.number || bulkBusy} onClick={() => addMatch(track)}>{busyTrack === track.number ? <Loader2 size={15} className="animate-spin" aria-hidden="true" /> : <Download size={15} aria-hidden="true" />}Download</button>
+                                <button type="button" className={`ff-btn ff-btn-quiet ff-btn-preview ${previewUi.active ? 'is-active' : ''}`} onPointerEnter={() => player.warm(candidate.url)} onFocus={() => player.warm(candidate.url)} onClick={() => player.toggle({ key: previewKey, url: candidate.url, title: candidate.title || track.title, artist: track.artist })} title={previewUi.title} aria-label={`${previewUi.label}: ${track.title}`}><previewUi.Icon size={15} className={previewUi.spin ? 'animate-spin' : undefined} aria-hidden="true" />{previewUi.label}</button>
+                                {state === 'ready' && !pickerOpen && <button type="button" className="ff-link" onClick={() => setOpenPickers(current => ({ ...current, [track.number]: true }))}>Change version</button>}
+                              </>
+                            )}
+                            {state === 'nomatch' && (
+                              <>
+                                <button type="button" className="ff-btn ff-btn-soft" onClick={() => openLink(youtubeSearchUrl(track))}><Search size={15} aria-hidden="true" />Search YouTube</button>
+                                {track.spotifyUrl && <button type="button" className="ff-link" onClick={() => openLink(track.spotifyUrl)}>Spotify</button>}
+                              </>
+                            )}
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <div className="ff-empty ff-empty-compact"><h3>No songs in this view</h3><p>{search ? `Nothing matches “${search}”.` : 'Try a different filter.'}</p><button type="button" className="ff-btn ff-btn-ghost" onClick={() => { setFilter('all'); setSearch(''); }}>Show all songs</button></div>
+              )}
+            </section>
+
+            <details className="ff-about">
+              <summary><Info size={15} aria-hidden="true" />How matching works</summary>
+              <p>Only studio audio is downloaded automatically: YouTube Music songs, “Topic” album uploads and official audio whose title, artist and length match Spotify. Music videos, live, remix, sped-up or slowed versions, covers, and anything more than 7 seconds off are skipped. Songs without a confident match are left for you to review. Make sure you have the right to download what you save.</p>
+            </details>
+          </>
+        )}
       </div>
-
-      {error && <div className="mb-5"><Notice tone="error">{error}</Notice></div>}
-
-      {playlist ? <>
-        <div className="panel mb-5 overflow-hidden">
-          <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 p-5"><div className="flex min-w-0 items-center gap-3"><div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-400 to-teal-600 text-white shadow-soft"><Music2 size={22} /></div><div className="min-w-0"><div className="truncate text-[16px] font-bold text-slate-900">{playlist.name}</div><div className="mt-0.5 truncate text-[10px] text-slate-400">{playlist.owner} · {playlist.tracks.length} tracks</div><button className="mt-1 inline-flex items-center gap-1 text-[9px] font-semibold text-emerald-700 hover:underline" onClick={() => openLink(playlist.url)}>Open Spotify playlist <ExternalLink size={10} /></button></div></div><div className="flex flex-wrap gap-2"><button className="btn-secondary" onClick={exportCsv}><FileSpreadsheet size={14} /> Export CSV</button><button className="btn-primary" disabled={matching || !toolStatus?.ytDlp?.installed} onClick={findMatches}>{matching ? <Loader2 size={14} className="animate-spin" /> : <Search size={14} />}{matching ? 'Finding matches…' : 'Find YouTube matches'}</button></div></div>
-          <div className="grid grid-cols-3 gap-3 p-4"><StatCard icon={Music2} label="Playlist tracks" value={playlist.tracks.length} tone="emerald" /><StatCard icon={CheckCircle2} label="Matched" value={matchedCount} tone="brand" /><StatCard icon={Headphones} label="Need review" value={failedCount || Math.max(0, playlist.tracks.length - matchedCount)} tone="amber" /></div>
-          {matching && <div className="border-t border-slate-100 px-5 py-3"><div className="mb-2 flex items-center justify-between gap-3 text-[10px]"><span className="truncate font-semibold text-slate-600">{progress.trackTitle || 'Searching YouTube…'}</span><div className="flex items-center gap-3"><span className="shrink-0 font-bold tabular-nums text-brand-700">{progress.current} / {progress.total}</span><button className="font-bold text-rose-600 hover:underline" onClick={() => window.flickfetch.spotify.cancelMatches()}>Cancel search</button></div></div><ProgressBar value={progress.total ? progress.current / progress.total * 100 : 0} /></div>}
-        </div>
-
-        <div className="panel overflow-hidden">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-3"><div><div className="text-[13px] font-bold text-slate-900">Track-by-track match review</div><div className="mt-0.5 text-[9px] text-slate-400">Choose a candidate, open it for review, or add it to the regular download queue.</div></div><div className="flex items-center gap-2"><div className="relative"><Search size={12} className="absolute left-2.5 top-2.5 text-slate-400" /><input className="w-[170px] rounded-lg border border-slate-200 py-1.5 pl-8 pr-2 text-[10px] outline-none focus:border-brand-400" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search tracks…" /></div><div className="flex rounded-lg bg-slate-100 p-0.5">{[['all', 'All'], ['matched', 'Matched'], ['unmatched', 'No match']].map(([id, label]) => <button key={id} className={`rounded-md px-2 py-1.5 text-[9px] font-bold ${filter === id ? 'bg-white text-brand-700 shadow-sm' : 'text-slate-400'}`} onClick={() => setFilter(id)}>{label}</button>)}</div></div></div>
-          {filteredTracks.length ? <div className="divide-y divide-slate-100">{filteredTracks.map(track => {
-            const candidate = selectedCandidate(track);
-            const hasCandidates = track.candidates?.length > 0;
-            return <div key={track.number} className="grid grid-cols-[38px_minmax(0,1fr)_minmax(250px,.95fr)_94px] items-center gap-4 px-5 py-4 transition hover:bg-slate-50/60">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-[10px] font-bold text-slate-500">{track.number}</div>
-              <div className="min-w-0"><div className="truncate text-[11px] font-bold text-slate-800">{track.title}</div><div className="mt-0.5 truncate text-[9px] text-slate-500">{track.artist}</div><div className="mt-1 flex items-center gap-2 text-[8px] text-slate-400"><span>{track.album || 'Album not listed'}</span><span>·</span><span>{formatDuration(track.durationMilliseconds)}</span>{track.spotifyUrl && <button className="font-semibold text-emerald-700 hover:underline" onClick={() => openLink(track.spotifyUrl)}>Spotify track</button>}</div></div>
-              <div className="min-w-0">{hasCandidates ? <><div className="mb-1 flex items-center justify-between gap-2"><span className="text-[8px] font-extrabold uppercase tracking-[.12em] text-slate-400">Suggested YouTube result</span><span className={`rounded-full px-2 py-0.5 text-[8px] font-bold ${candidate?.score >= 80 ? 'bg-emerald-50 text-emerald-700' : candidate?.score >= 62 ? 'bg-brand-50 text-brand-700' : 'bg-amber-50 text-amber-700'}`}>{candidate?.score ?? '—'} / 100</span></div><select className="field-control !py-2 text-[10px]" value={candidate?.url || ''} onChange={event => setSelectedMatches(current => ({ ...current, [track.number]: event.target.value }))}>{track.candidates.map((item, index) => <option key={item.url} value={item.url}>{index + 1}. {item.title} · {item.score}%</option>)}</select><div className="mt-1 truncate text-[8px] text-slate-400">{candidate?.channel || 'Unknown channel'} · {candidate?.matchLabel || 'Review candidate'}</div></> : <div className="rounded-lg bg-slate-50 px-3 py-2 text-[9px] text-slate-400">{track.matchStatus || 'Waiting for search'}</div>}</div>
-              <div className="flex flex-col items-end gap-1.5">{hasCandidates ? <><button className="btn-secondary !w-full !justify-center !px-2 !py-2" onClick={() => openLink(candidate?.url)}><Youtube size={13} /> Open</button><button className="btn-primary !w-full !justify-center !px-2 !py-2" disabled={busyTrack === track.number} onClick={() => addMatch(track)}>{busyTrack === track.number ? <Loader2 size={12} className="animate-spin" /> : <Download size={12} />} Add</button></> : <span className="text-[9px] text-slate-300">No result</span>}</div>
-            </div>;
-          })}</div> : <div className="px-5 py-12 text-center text-[10px] text-slate-400">No tracks match your search or filter.</div>}
-        </div>
-        <div className="mt-4"><Notice tone="warning">Match scores are heuristic suggestions, not verification that a result is the same recording or that it may legally be downloaded. Check the title, artist, source, and rights yourself. FlickFetch does not bulk-download playlist matches automatically.</Notice></div>
-      </> : <div className="panel flex flex-col items-center px-6 py-16 text-center"><div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600"><Music2 size={25} /></div><div className="mt-4 text-[14px] font-bold text-slate-800">Your playlist review starts here</div><p className="mt-1 max-w-[360px] text-[10px] leading-relaxed text-slate-400">Import a public Spotify playlist to read its track list. FlickFetch will then search YouTube and show likely matches for you to review individually.</p><button className="btn-secondary mt-4" onClick={onOpenDownloads}>Go to Downloads <ExternalLink size={13} /></button></div>}
-
     </div>
   );
 }

@@ -43,6 +43,23 @@ function findOnPath(names) {
   return null;
 }
 
+const YTDLP_LATEST_API = 'https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest';
+const UPDATE_CHECK_TTL_MS = 6 * 60 * 60 * 1000;   // re-ask GitHub at most every 6 hours
+const UPDATE_RETRY_TTL_MS = 10 * 60 * 1000;       // after a failed check, try again in 10 minutes
+
+// yt-dlp versions look like 2026.10.26 (stable) or 2026.10.26.232901 (nightly). Returns >0 if a is newer than b.
+function compareYtDlpVersions(a, b) {
+  const parse = value => String(value || '').trim().replace(/^v/i, '').split('.').map(part => parseInt(part, 10));
+  const left = parse(a);
+  const right = parse(b);
+  if (left.some(Number.isNaN) || right.some(Number.isNaN)) return 0;
+  for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
+    const diff = (left[i] || 0) - (right[i] || 0);
+    if (diff) return diff;
+  }
+  return 0;
+}
+
 function runCapture(exe, args, cwd, timeout = 30000) {
   return new Promise((resolve, reject) => {
     const child = spawn(exe, args, { cwd, windowsHide: true, env: { ...process.env, PATH: `${cwd}${path.delimiter}${process.env.PATH || ''}`, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' } });
@@ -60,7 +77,7 @@ function runCapture(exe, args, cwd, timeout = 30000) {
 }
 
 async function downloadTo(url, destination, progress) {
-  const response = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': 'FlickFetch/2.1.0' } });
+  const response = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': 'FlickFetch/2.1.1' } });
   if (!response.ok || !response.body) throw new Error(`Download failed (${response.status} ${response.statusText}).`);
   const total = Number(response.headers.get('content-length')) || 0;
   const file = fs.createWriteStream(destination);
@@ -92,7 +109,7 @@ class ToolManager {
     this.ffmpegPath = this.findLocalOrPath(ffNames, 'ffmpeg');
     this.ffprobePath = this.findLocalOrPath(fpNames, 'ffprobe');
     this.denoPath = this.findLocalOrPath(deNames, 'deno');
-    return this.getStatus();
+    // NOTE: must NOT call getStatus() here - getStatus() calls refresh(), which caused infinite recursion.
   }
 
   findLocalOrPath(names, baseName) {
@@ -150,7 +167,7 @@ class ToolManager {
       try {
         await downloadTo(TOOL_URLS.ytDlp, temp, f => report('Downloading yt-dlp…', f * 0.9));
         report('Verifying yt-dlp checksum…', 0.94);
-        const sumsResponse = await fetch(TOOL_URLS.checksums, { headers: { 'User-Agent': 'FlickFetch/2.1.0' } });
+        const sumsResponse = await fetch(TOOL_URLS.checksums, { headers: { 'User-Agent': 'FlickFetch/2.1.1' } });
         if (!sumsResponse.ok) throw new Error('Unable to retrieve the official yt-dlp checksum list. The downloaded file was not installed.');
         const sums = await sumsResponse.text();
         const line = sums.split(/\r?\n/).find(row => /\s\*?yt-dlp\.exe\s*$/i.test(row.trim()));
@@ -210,13 +227,64 @@ class ToolManager {
     return this.getStatus();
   }
 
+  /**
+   * Compares the installed yt-dlp with the latest GitHub release.
+   * Never throws: if offline or rate-limited, updateAvailable is simply false so the UI stays quiet.
+   */
+  async checkYtDlpUpdate({ force = false } = {}) {
+    this.refresh();
+    const current = this.ytDlpPath ? await this.getVersion(this.ytDlpPath, ['--version']) : null;
+    const now = Date.now();
+    const cache = this._latestYtDlp;
+    if (force || !cache || now - cache.checkedAt > (cache.latest ? UPDATE_CHECK_TTL_MS : UPDATE_RETRY_TTL_MS)) {
+      let latest = null;
+      try {
+        const response = await fetch(YTDLP_LATEST_API, {
+          headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'FlickFetch' },
+          signal: AbortSignal.timeout(8000)
+        });
+        if (response.ok) latest = String((await response.json()).tag_name || '').replace(/^v/i, '') || null;
+      } catch { /* offline, DNS, rate limit... stay quiet */ }
+      this._latestYtDlp = { latest, checkedAt: now };
+    }
+    const latest = this._latestYtDlp.latest;
+    return { current, latest, updateAvailable: Boolean(current && latest && compareYtDlpVersions(latest, current) > 0) };
+  }
+
+  isManagedYtDlp() {
+    if (!this.ytDlpPath) return false;
+    return path.dirname(path.resolve(this.ytDlpPath)).toLowerCase() === path.resolve(this.binDir).toLowerCase();
+  }
+
   async updateYtDlp() {
     this.refresh();
     if (!this.ytDlpPath) throw new Error('yt-dlp is not installed.');
-    const result = await runCapture(this.ytDlpPath, ['-U', '--color', 'never'], this.binDir, 180000);
-    const output = `${result.stdout}\n${result.stderr}`.trim();
-    if (result.code !== 0) throw new Error(output || `yt-dlp update failed (exit code ${result.code}).`);
-    return output || 'yt-dlp is up to date.';
+    const canInstall = process.platform === 'win32' && process.arch === 'x64';
+    const before = await this.getVersion(this.ytDlpPath, ['--version']);
+    let selfUpdateError = '';
+
+    // 1) A copy managed by FlickFetch (standalone yt-dlp.exe in binDir) can update itself.
+    if (this.isManagedYtDlp() && /\.exe$/i.test(this.ytDlpPath)) {
+      try {
+        const result = await runCapture(this.ytDlpPath, ['-U', '--color', 'never'], this.binDir, 180000);
+        const output = `${result.stdout}\n${result.stderr}`.trim();
+        if (result.code === 0) return output || 'yt-dlp is up to date.';
+        selfUpdateError = output || `exit code ${result.code}`;
+      } catch (error) { selfUpdateError = error.message; }
+    }
+
+    // 2) Everything else (pip/wheel, package manager, or a failed self-update): `yt-dlp -U` cannot update
+    //    those installs, so install the official, checksum-verified standalone build into FlickFetch's own
+    //    bin folder. findLocalOrPath() prefers that folder, so it takes priority over the PATH copy
+    //    and the external installation is left untouched.
+    if (!canInstall) {
+      throw new Error(`yt-dlp cannot be updated automatically on this platform. Update it with the tool you installed it with (for example: python -m pip install -U yt-dlp).${selfUpdateError ? `\n\n${selfUpdateError}` : ''}`);
+    }
+    await this.install({ ytDlp: true, ffmpeg: false, deno: false });
+    const after = await this.getVersion(this.ytDlpPath, ['--version']);
+    if (before && after && before === after) return `yt-dlp is already up to date (${after}).`;
+    const where = this.isManagedYtDlp() ? '' : ' Note: another yt-dlp earlier on your PATH is still being used; remove it so FlickFetch uses its own copy.';
+    return `yt-dlp updated${before ? ` from ${before}` : ''}${after ? ` to ${after}` : ''}.${where}`;
   }
 
   async run(args, options = {}) {
@@ -226,4 +294,4 @@ class ToolManager {
   }
 }
 
-module.exports = { ToolManager };
+module.exports = { ToolManager, compareYtDlpVersions };

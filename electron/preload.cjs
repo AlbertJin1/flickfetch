@@ -8,6 +8,12 @@ const subscribe = (channel, listener) => {
 };
 
 contextBridge.exposeInMainWorld('flickfetch', {
+  window: {
+    minimize: () => ipcRenderer.invoke('window:minimize'),
+    toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),
+    close: () => ipcRenderer.invoke('window:close'),
+    isMaximized: () => ipcRenderer.invoke('window:is-maximized')
+  },
   app: {
     signalReady: () => ipcRenderer.send('app:renderer-ready'),
     getInfo: () => ipcRenderer.invoke('app:get-info'),
@@ -15,6 +21,17 @@ contextBridge.exposeInMainWorld('flickfetch', {
     openPath: filePath => ipcRenderer.invoke('app:open-path', filePath),
     readClipboard: () => ipcRenderer.invoke('app:read-clipboard'),
     revealPath: filePath => ipcRenderer.invoke('app:reveal-path', filePath)
+  },
+  updater: {
+    check: options => ipcRenderer.invoke('updater:check', options),
+    install: () => ipcRenderer.invoke('updater:install')
+  },
+  monitor: {
+    submitReview: review => ipcRenderer.invoke('monitor:submit-review', review),
+    maybePromptReview: () => ipcRenderer.invoke('monitor:review-maybe-prompt'),
+    markReviewPromptShown: () => ipcRenderer.invoke('monitor:review-prompt-shown'),
+    deferReview: choice => ipcRenderer.invoke('monitor:review-defer', choice),
+    getReviewIdentity: () => ipcRenderer.invoke('monitor:review-identity')
   },
   settings: {
     get: () => ipcRenderer.invoke('settings:get'),
@@ -25,7 +42,8 @@ contextBridge.exposeInMainWorld('flickfetch', {
   tools: {
     status: () => ipcRenderer.invoke('tools:status'),
     install: selection => ipcRenderer.invoke('tools:install', selection),
-    updateYtDlp: () => ipcRenderer.invoke('tools:update-ytdlp')
+    updateYtDlp: () => ipcRenderer.invoke('tools:update-ytdlp'),
+    checkYtDlpUpdate: () => ipcRenderer.invoke('tools:check-update')
   },
   downloads: {
     snapshot: () => ipcRenderer.invoke('downloads:snapshot'),
@@ -40,10 +58,14 @@ contextBridge.exposeInMainWorld('flickfetch', {
     getLog: id => ipcRenderer.invoke('downloads:get-log', id)
   },
   inspect: (url, type) => ipcRenderer.invoke('media:inspect', url, type),
+  preview: {
+    prepare: (url, options) => ipcRenderer.invoke('preview:prepare', url, options),
+    warm: url => ipcRenderer.invoke('preview:warm', url)
+  },
   spotify: {
     importPlaylist: url => ipcRenderer.invoke('spotify:import', url),
-    findMatches: playlist => ipcRenderer.invoke('spotify:find-matches', playlist),
-    addMatch: (url, title) => ipcRenderer.invoke('spotify:add-match', url, title),
+    findMatches: (playlist, options) => ipcRenderer.invoke('spotify:find-matches', playlist, options),
+    addMatch: (candidate, track, playlistName) => ipcRenderer.invoke('spotify:add-match', candidate, track, playlistName),
     exportCsv: playlist => ipcRenderer.invoke('spotify:export-csv', playlist),
     cancelMatches: () => ipcRenderer.invoke('spotify:cancel-matches')
   },
@@ -51,8 +73,12 @@ contextBridge.exposeInMainWorld('flickfetch', {
     downloadsChanged: listener => subscribe('downloads:changed', listener),
     queueState: listener => subscribe('downloads:queue-state', listener),
     toolsProgress: listener => subscribe('tools:progress', listener),
+    toolsChanged: listener => subscribe('tools:changed', listener),
     spotifyProgress: listener => subscribe('spotify:match-progress', listener),
     clipboardDetected: listener => subscribe('clipboard:detected', listener),
-    appLog: listener => subscribe('app:log', listener)
+    appLog: listener => subscribe('app:log', listener),
+    windowStateChanged: listener => subscribe('window:state-changed', listener),
+    updaterStatus: listener => subscribe('updater:status', listener),
+    updaterProgress: listener => subscribe('updater:progress', listener)
   }
 });

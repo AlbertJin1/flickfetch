@@ -1,26 +1,25 @@
 {
   "name": "flickfetch",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "FlickFetch desktop media downloader built with React, Electron, and Tailwind CSS.",
   "author": "Jessie Albert Regualos",
   "license": "UNLICENSED",
   "private": true,
   "main": "electron/main.cjs",
+  "type": "module",
   "scripts": {
-    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
-    "start": "electron .",
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron . --dev\"",
+    "start": "npm run build && electron .",
     "build": "vite build",
     "preview": "vite preview",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
     "dist:portable": "npm run build && electron-builder --win portable --x64",
-    "check": "node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/services/tool-manager.cjs && node --check electron/services/download-service.cjs && node --check electron/services/spotify-service.cjs && node --check electron/services/legacy-settings.cjs",
+    "build:win": "npm run build && electron-builder --win portable --x64 --publish never",
+    "check": "node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/services/monitor-service.cjs && node --check electron/services/monitor-api.cjs && node --check electron/services/review-queue-policy.cjs && node --check electron/services/tool-manager.cjs && node --check electron/services/download-service.cjs && node --check electron/services/spotify-service.cjs && node --check electron/services/japanese.cjs && node --check electron/services/preview-service.cjs && node --check electron/services/page-sniffer.cjs && node --check electron/services/rendered-sniffer.cjs && node --check electron/services/legacy-settings.cjs && node --check electron/services/window-state.cjs",
     "test": "node --test"
   },
   "dependencies": {
-    "adm-zip": "^0.6.1",
-    "lucide-react": "^1.65.0",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0"
+    "adm-zip": "^0.6.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
@@ -28,6 +27,9 @@
     "concurrently": "^9.1.2",
     "electron": "^45.1.0",
     "electron-builder": "^26.18.1",
+    "lucide-react": "^1.65.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "tailwindcss": "^4.3.3",
     "vite": "^8.3.5",
     "wait-on": "^8.0.1"
@@ -36,14 +38,16 @@
     "appId": "com.regualos.flickfetch",
     "productName": "FlickFetch",
     "asar": true,
+    "compression": "store",
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "build"
     },
     "files": [
       "dist/**/*",
       "electron/**/*",
       "package.json",
-      "node_modules/**/*",
+      "!**/*.map",
       "!node_modules/.cache/**/*"
     ],
     "win": {
@@ -51,13 +55,18 @@
         "nsis",
         "portable"
       ],
-      "artifactName": "FlickFetch-${version}-${arch}.${ext}"
+      "requestedExecutionLevel": "asInvoker",
+      "artifactName": "FlickFetch-${version}-${arch}.${ext}",
+      "icon": "build/icon.ico"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico"
     },
     "portable": {
       "artifactName": "FlickFetch-${version}-${arch}-Portable.${ext}"

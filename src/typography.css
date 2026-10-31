@@ -1,0 +1,26 @@
+/* Typography layer: loaded last so it wins over the per-component rules.
+   Display: Bricolage Grotesque (headings, brand, big numbers). Text: Instrument Sans. Data: JetBrains Mono. */
+:root {
+  --font-text: 'Instrument Sans', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
+  --font-display: 'Bricolage Grotesque', 'Instrument Sans', 'Segoe UI Variable', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-family: var(--font-text);
+}
+body, button, input, select, textarea { font-family: var(--font-text); }
+
+h1, h2, h3, h4,
+.chrome-brand-name, .brand-wordmark, .about-logo, .about-title h2,
+.ff-queue-title h2, .ff-row-title, .ff-track-title, .ff-candidate-title, .ff-tracks-title,
+.engine-card strong, .sidebar-user-copy strong, .st-card-title h4,
+.update-versions dd, .update-hero h3, .drop-overlay-card strong {
+  font-family: var(--font-display);
+  font-optical-sizing: auto;
+}
+h1, h2, h3, h4 { letter-spacing: -.02em; }
+.about-logo, .sidebar-avatar, .chrome-brand-mark { font-family: var(--font-display); }
+
+/* Machine-ish text: versions, paths, shortcuts, logs */
+.ff-mono, .ff-log, .st-textarea.field-control, .st-folder code, kbd, code, pre,
+.about-tool-version, .status-version, .update-versions dd { font-family: var(--font-mono); }
+.update-versions dd { font-family: var(--font-display); }
+.about-tool-version, .status-version { font-size: 11.5px; letter-spacing: -.02em; }

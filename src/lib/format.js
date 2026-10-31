@@ -44,3 +44,13 @@ export function timeAgo(value) {
 export function safeHost(value) {
   try { return new URL(value).hostname.replace(/^www\./, ''); } catch { return value || ''; }
 }
+
+/** "Downloaded 12.4 MB of 231.0 MB (only the changed parts)" from the updater's transfer stats. */
+export function describeTransfer(transfer) {
+  if (!transfer || !Number(transfer.totalBytes)) return '';
+  const got = formatBytes(transfer.downloadedBytes);
+  const total = formatBytes(transfer.totalBytes);
+  if (transfer.method === 'delta') return `Downloaded ${got} of ${total} (only the changed parts)`;
+  if (transfer.method === 'compressed') return `Downloaded ${got} (compressed full update)`;
+  return `Downloaded ${got} (full update)`;
+}

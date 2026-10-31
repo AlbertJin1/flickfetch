@@ -3,6 +3,7 @@ const readline = require('node:readline');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const pageSniffer = require('./page-sniffer.cjs');
 
 const PRESETS = [
   'Best quality (video + audio)', 'Up to 2160p (4K)', 'Up to 1440p', 'Up to 1080p',
@@ -27,7 +28,21 @@ function splitArgs(value) {
   return result;
 }
 
-function buildDownloadArgs(settings, binDir) {
+/** Make a literal title safe inside yt-dlp's `--parse-metadata FROM:TO` (colons separate, % starts a field). */
+function escapeParseMetadata(value) {
+  return String(value || '').replace(/\\/g, '/').replace(/%/g, '%%').replace(/:/g, '\\:').replace(/[\r\n]+/g, ' ').trim();
+}
+
+function cleanPageTitle(value) {
+  return String(value || '').replace(/[\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 150);
+}
+
+/**
+ * `resolved` is set when the page sniffer found the real media behind a page:
+ * { url, referer, userAgent, title }. The same Referer/User-Agent the browser used are sent, which signed or
+ * hot-link protected CDNs (e.g. `...embedplayer.net/...mp4?st=...&e=...`) require.
+ */
+function buildDownloadArgs(settings, binDir, resolved = null) {
   const s = settings;
   const args = ['--ignore-config', '--encoding', 'utf-8', '--color', 'never'];
   if (s.proxy?.trim()) args.push('--proxy', s.proxy.trim());
@@ -94,6 +109,12 @@ function buildDownloadArgs(settings, binDir) {
   args.push('--concurrent-fragments', String(Math.max(1, Math.min(16, Number(s.fragments) || 4))));
   args.push('--retries', String(Math.max(0, Math.min(100, Number(s.retries) || 0))));
   args.push('--fragment-retries', String(Math.max(0, Math.min(100, Number(s.retries) || 0))));
+  if (resolved) {
+    if (resolved.referer) args.push('--referer', resolved.referer);
+    args.push('--user-agent', resolved.userAgent || pageSniffer.BROWSER_UA);
+    const title = cleanPageTitle(resolved.title);
+    if (title) args.push('--parse-metadata', `${escapeParseMetadata(title)}:%(title)s`);
+  }
   args.push(...splitArgs(s.extraArgs));
   return args;
 }
@@ -123,11 +144,13 @@ function friendlyHint(message, url) {
 }
 
 class DownloadService {
-  constructor({ toolManager, getSettings, emit, userDataPath }) {
+  constructor({ toolManager, getSettings, emit, userDataPath, resolveMedia }) {
     this.tools = toolManager;
     this.getSettings = getSettings;
     this.emit = emit || (() => {});
     this.userDataPath = userDataPath;
+    // (pageUrl, { signal, log }) => { ok, selected:{url,referer,kind,source}, title, stage, reason }
+    this.resolveMedia = resolveMedia || ((url, options) => pageSniffer.resolveMedia({ url, ...options }));
     this.items = [];
     this.processes = new Map();
     this.running = false;
@@ -181,24 +204,32 @@ class DownloadService {
   add(urls) {
     const added = [];
     const settings = { ...this.getSettings() };
-    if (settings.preset === 8 && !String(settings.customFormat || '').trim()) throw new Error('Enter a custom format string in Settings or select another quality preset.');
     if (!String(settings.outputDir || '').trim()) throw new Error('Choose an output folder before adding downloads.');
     const entries = urls.map(raw => raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : { url: raw })
-      .map(entry => ({ url: String(entry.url || '').trim(), title: String(entry.title || '').trim().slice(0, 300) }))
+      .map(entry => ({
+        url: String(entry.url || '').trim(), title: String(entry.title || '').trim().slice(0, 300),
+        overrides: entry.overrides && typeof entry.overrides === 'object' ? entry.overrides : null
+      }))
       .filter(entry => entry.url);
     for (const entry of entries) {
+      const effective = { ...settings, ...(entry.overrides || {}) };
+      if (Number(effective.preset) === 8 && !String(effective.customFormat || '').trim()) throw new Error('Enter a custom format string in Settings or select another quality preset.');
       if (!isAcceptedUrl(entry.url)) throw new Error(`This does not look like a supported media URL: ${entry.url}`);
       if (/spotify\.(com|link|app\.link)/i.test(entry.url)) throw new Error('Spotify playlists must be imported from the Spotify Playlist workspace for match review.');
     }
     for (const entry of entries) {
       const url = entry.url;
+      // Never queue the same URL twice while an earlier copy is still pending, running or finished.
+      const existing = this.items.find(item => item.url === url && !entry.overrides === !item.overrides && !['Failed', 'Canceled'].includes(item.status));
+      if (existing) { added.push(existing); continue; }
       const initialTitle = entry.title || url;
       const item = {
         id: crypto.randomUUID(), number: this.nextNumber++, url, title: initialTitle,
         status: 'Queued', progress: -1, fileProgress: -1, playlistIndex: 0, playlistCount: 0,
         speed: -1, eta: -1, totalBytes: 0, finalSize: 0, stage: '', filePath: '',
         errorText: '', cancelRequested: false, createdAt: new Date().toISOString(),
-        settingsSnapshot: settings, logs: [`Added to queue: ${url}`]
+        overrides: entry.overrides || undefined, fixedTitle: entry.overrides ? initialTitle : undefined,
+        settingsSnapshot: { ...settings, ...(entry.overrides || {}) }, logs: [`Added to queue: ${url}`]
       };
       added.push(item);
       this.items.unshift(item);
@@ -226,12 +257,12 @@ class DownloadService {
     } finally { this.pumping = false; }
   }
 
-  runItem(item) {
+  runItem(item, resolved = null) {
     const snapshot = item.settingsSnapshot || this.getSettings();
     let args;
     try {
-      args = buildDownloadArgs({ ...snapshot, ffmpegPath: this.tools.ffmpegPath }, this.tools.binDir);
-      args.push('--', item.url);
+      args = buildDownloadArgs({ ...snapshot, ffmpegPath: this.tools.ffmpegPath }, this.tools.binDir, resolved);
+      args.push('--', resolved ? resolved.url : item.url);
     } catch (error) {
       item.status = 'Failed'; item.errorText = error.message; item.logs.push(`ERROR: ${error.message}`); this.publish(item); return;
     }
@@ -240,6 +271,7 @@ class DownloadService {
       item.status = 'Failed'; item.errorText = 'yt-dlp is not installed. Open Settings → Tools to install it.'; item.logs.push(item.errorText); this.publish(item); return;
     }
     item.status = 'Starting'; item.errorText = ''; item.stage = ''; item.speed = -1; item.eta = -1;
+    item.attemptStart = item.logs.length;
     item.logs.push(`> yt-dlp ${args.map(arg => /\s/.test(arg) ? JSON.stringify(arg) : arg).join(' ')}`);
     this.publish(item);
 
@@ -268,6 +300,9 @@ class DownloadService {
       } else if (code === 0) {
         item.status = 'Done'; item.progress = 100; item.fileProgress = 100;
         try { if (item.filePath && fs.existsSync(item.filePath)) item.finalSize = fs.statSync(item.filePath).size; } catch { /* ignore */ }
+      } else if (this.needsPageInspection(item, snapshot, resolved)) {
+        this.inspectAndRetry(item, snapshot);
+        return;
       } else {
         item.status = 'Failed';
         if (!item.errorText) item.errorText = `yt-dlp exited with code ${code ?? 'unknown'}.`;
@@ -277,6 +312,52 @@ class DownloadService {
       this.publish(item);
       this.pump();
     });
+  }
+
+  /** yt-dlp had no dedicated extractor (it fell to its generic one) or found no playable format on a web page. */
+  needsPageInspection(item, snapshot, resolved) {
+    if (resolved || item.inspected || snapshot.inspectPages === false) return false;
+    if (!/^https?:\/\//i.test(item.url)) return false;
+    const attempt = (item.logs || []).slice(Math.max(0, item.attemptStart || 0)).join('\n');
+    return /\[generic\]|Unsupported URL|No video formats found|Unable to extract|no video could be found|There is no video in this post/i.test(attempt);
+  }
+
+  /**
+   * Read the page like DevTools would (<video><source type="video/mp4">, og:video, player configs, nested iframes,
+   * then the live rendered DOM and media requests), verify the result with the right Referer, and download that.
+   */
+  async inspectAndRetry(item, snapshot) {
+    item.inspected = true;
+    const originalError = item.errorText;
+    const controller = new AbortController();
+    this.processes.set(item.id, { placeholder: true, controller }); // keeps this item's download slot while inspecting
+    item.status = 'Processing'; item.stage = 'Inspecting page for video'; item.speed = -1; item.eta = -1; item.progress = -1; item.fileProgress = -1; item.errorText = '';
+    item.logs.push('yt-dlp has no extractor for this page. Inspecting it for a video source…');
+    this.publish(item);
+    let result;
+    try {
+      result = await this.resolveMedia(item.url, { signal: controller.signal, log: message => { item.logs.push(message); this.publish(item); } });
+    } catch (error) { result = { ok: false, reason: error.message }; }
+    this.processes.delete(item.id);
+    if (item.cancelRequested) {
+      item.status = 'Canceled'; item.stage = ''; item.logs.push('Canceled.'); this.publish(item); this.pump(); return;
+    }
+    if (!result || !result.ok || !result.selected) {
+      item.status = 'Failed'; item.stage = '';
+      const reason = result?.reason || 'No video source was found in the page.';
+      item.errorText = friendlyHint(`${originalError ? `${originalError} ` : ''}${reason}`, item.url);
+      item.logs.push(`Failed: ${item.errorText}`);
+      this.publish(item); this.pump(); return;
+    }
+    const chosen = result.selected;
+    const title = cleanPageTitle(result.title);
+    if (title && !item.fixedTitle) item.fixedTitle = title;
+    if (title && item.title === item.url) item.title = title;
+    item.resolvedSource = chosen.url;
+    item.logs.push(`Using ${chosen.kind === 'embed' ? 'embedded player' : chosen.kind.toUpperCase()} source found ${result.stage === 'rendered' ? 'in the live page' : 'in the page'}${chosen.type ? ` (${chosen.type})` : ''}: ${chosen.url}`);
+    item.status = 'Starting'; item.stage = ''; item.errorText = '';
+    this.publish(item);
+    this.runItem(item, { url: chosen.url, referer: chosen.referer || (chosen.kind === 'embed' ? item.url : ''), userAgent: pageSniffer.BROWSER_UA, title });
   }
 
   handleLine(item, line, isStderr) {
@@ -306,7 +387,7 @@ class DownloadService {
       const parts = line.split('|');
       item.playlistIndex = Number(parts[1]) || 0;
       item.playlistCount = Number(parts[2]) || 0;
-      item.title = parts.slice(3).join('|') || item.url;
+      item.title = item.fixedTitle || parts.slice(3).join('|') || item.url;
       item.fileProgress = 0;
       item.progress = item.playlistCount > 1 && item.playlistIndex > 0 ? ((item.playlistIndex - 1) * 100) / item.playlistCount : 0;
       item.status = 'Downloading';
@@ -337,6 +418,10 @@ class DownloadService {
     const child = this.processes.get(id);
     if (!child) return false;
     item.cancelRequested = true;
+    if (child.placeholder) { // still inspecting the page, no process yet
+      child.controller.abort();
+      item.logs.push('Cancellation requested…'); this.publish(item); return true;
+    }
     try {
       if (process.platform === 'win32') {
         const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
@@ -363,6 +448,7 @@ class DownloadService {
     item.status = 'Queued'; item.progress = -1; item.fileProgress = -1; item.speed = -1; item.eta = -1;
     item.totalBytes = 0; item.finalSize = 0; item.stage = ''; item.errorText = ''; item.cancelRequested = false;
     item.playlistIndex = 0; item.playlistCount = 0; item.filePath = '';
+    item.inspected = false; item.resolvedSource = undefined;
     item.logs.push('---- retry ----');
     this.publish(item); this.start(); return true;
   }
@@ -385,4 +471,4 @@ class DownloadService {
   }
 }
 
-module.exports = { DownloadService, PRESETS, buildDownloadArgs, isAcceptedUrl, splitArgs };
+module.exports = { DownloadService, PRESETS, buildDownloadArgs, isAcceptedUrl, splitArgs, escapeParseMetadata };
