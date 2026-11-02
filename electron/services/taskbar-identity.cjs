@@ -5,11 +5,14 @@
  * temporary folder, so a shortcut pinned from FlickFetch.exe has no AppUserModelID and a different target than the running
  * process; Windows then shows the pinned icon AND a second, separate icon for the running window.
  *
- * Two fixes, both harmless when nothing needs fixing:
+ * Three fixes, all harmless when nothing needs fixing:
  *  1. applyWindowIdentity: tells Windows which exe to launch when this window is pinned or relaunched (the real portable
  *     exe, not the temp copy), so pinning the running window creates a correct shortcut.
  *  2. repairPinnedShortcuts: stamps the AppUserModelID onto an existing FlickFetch shortcut in the user's pinned-taskbar
  *     folder, so an icon pinned earlier groups with the running window from the next launch on.
+ *  3. The same repair sets the shortcut's description to "Flick Fetch". When the app is not running, Windows shows the
+ *     shortcut's own stored description as the hover text, copied from the exe at the moment it was pinned. A shortcut
+ *     pinned from an older build keeps that old long text forever, even after the exe's description was shortened.
  */
 const fs = require('node:fs');
 const path = require('node:path');
@@ -47,10 +50,11 @@ function repairPinnedShortcuts({ shell, env = process.env, launcher = launcherPa
       const file = path.join(dir, name);
       try {
         const link = shell.readShortcutLink(file);
-        if (!isFlickFetchShortcut(link, launcher) || link.appUserModelId === APP_ID) continue;
-        if (shell.writeShortcutLink(file, 'update', { appUserModelId: APP_ID })) {
+        if (!isFlickFetchShortcut(link, launcher)) continue;
+        if (link.appUserModelId === APP_ID && link.description === DISPLAY_NAME) continue;
+        if (shell.writeShortcutLink(file, 'update', { appUserModelId: APP_ID, description: DISPLAY_NAME })) {
           fixed++;
-          log('info', `Linked the pinned taskbar icon "${name}" to the running app so only one icon shows.`);
+          log('info', `Updated the pinned taskbar icon "${name}": one icon, and its hover text is just "${DISPLAY_NAME}".`);
         }
       } catch (error) { log('warn', `Could not read the pinned shortcut ${name}: ${error.message}`); }
     }

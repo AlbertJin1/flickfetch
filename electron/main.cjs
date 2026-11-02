@@ -342,8 +342,25 @@ function registerIpc() {
     packaged: app.isPackaged, userDataPath: app.getPath('userData')
   }));
   ipcMain.handle('updater:check', async (_event, options) => monitor ? monitor.checkForUpdates(options || {}) : ({ supported: false, updateAvailable: false }));
+  // Background download + verification. Resolves when a verified update is staged beside the exe; "Update later" simply leaves it there.
+  ipcMain.handle('updater:stage', async () => {
+    if (!monitor) throw new Error('The update service is not ready.');
+    const info = await monitor.checkForUpdates({});
+    if (!info.updateAvailable || info.installMode !== 'install') return { staged: false };
+    return monitor.stageUpdate(info);
+  });
   ipcMain.handle('updater:install', async () => {
     if (!monitor) throw new Error('The update service is not ready.');
+    // Like PDF Studio's unsaved-edits check: never restart into an update while downloads are still running without asking.
+    const busy = downloads?.snapshot?.().items?.filter(item => ['starting', 'downloading', 'processing'].includes(String(item.status || '').toLowerCase())).length || 0;
+    if (busy > 0) {
+      const { response } = await dialog.showMessageBox(mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined, {
+        type: 'question', title: 'Update FlickFetch', message: `${busy} download${busy === 1 ? ' is' : 's are'} still running`,
+        detail: 'FlickFetch has to close to finish the update. Running downloads will be stopped; you can resume them afterwards.',
+        buttons: ['Update now', 'Not yet'], defaultId: 1, cancelId: 1, noLink: true
+      });
+      if (response !== 0) return { success: false, cancelled: true, restarting: false };
+    }
     const result = await monitor.downloadAndInstallUpdate();
     // The detached PowerShell handoff waits for this process to exit before replacing the portable exe.
     // Installed builds only download the verified release, so they keep running.
@@ -525,7 +542,17 @@ app.whenReady().then(async () => {
     }).then(({ response }) => { if (hasFile && response === 0) shell.showItemInFolder(outcome.newPath); }).catch(() => {});
   }, 2500);
   if (app.isPackaged && process.platform === 'win32') {
-    setTimeout(() => monitor.checkForUpdates().catch(error => emit('app:log', { level: 'warn', message: `FlickFetch update check failed: ${error.message}` })), 1800);
+    // 1) An update the person postponed ("Update later") is re-verified and offered again.  2) Then check for a newer one and,
+    // like PDF Studio, download and verify it quietly in the background so "Update now" is only a rename.
+    monitor.restoreStagedUpdate().catch(error => emit('app:log', { level: 'warn', message: `Staged update check failed: ${error.message}` }));
+    setTimeout(async () => {
+      try {
+        const info = await monitor.checkForUpdates();
+        if (settings.autoUpdate && info.updateAvailable && info.installMode === 'install') {
+          await monitor.stageUpdate(info);
+        }
+      } catch (error) { emit('app:log', { level: 'warn', message: `FlickFetch update check failed: ${error.message}` }); }
+    }, 1800);
   }
   if (settings.autoUpdate && tools.isManagedYtDlp()) {
     setTimeout(async () => {
@@ -541,6 +568,9 @@ app.whenReady().then(async () => {
   dialog.showErrorBox('FlickFetch could not start', error.stack || error.message);
   app.quit();
 });
+
+// After an in-place update the new exe already sits at the old path; start it as the last thing this process does.
+app.on('quit', () => { try { monitor?.relaunchAfterQuit?.(); } catch { /* the new exe can still be opened by hand from the same path */ } });
 
 app.on('will-quit', () => { try { preview?.clearCacheDir(); } catch { /* temp audio is also cleared on next start */ } });
 

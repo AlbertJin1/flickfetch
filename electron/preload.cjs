@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld('flickfetch', {
   },
   updater: {
     check: options => ipcRenderer.invoke('updater:check', options),
+    stage: () => ipcRenderer.invoke('updater:stage'),
     install: () => ipcRenderer.invoke('updater:install')
   },
   monitor: {

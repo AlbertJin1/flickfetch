@@ -26,7 +26,7 @@ const emptySettings = {
 };
 
 
-const UPDATE_PHASES = { prepare: 'Preparing', manifest: 'Checking release', differential: 'Comparing files', download: 'Downloading', verify: 'Verifying', reconstruct: 'Rebuilding', save: 'Saving', saved: 'Saved', restarting: 'Restarting' };
+const UPDATE_PHASES = { prepare: 'Preparing', manifest: 'Checking release', differential: 'Comparing files', download: 'Downloading', verify: 'Verifying', reconstruct: 'Rebuilding', save: 'Saving', saved: 'Saved', staged: 'Ready', restarting: 'Restarting' };
 
 function App() {
   const [screen, setScreen] = useState('downloads');
@@ -46,6 +46,10 @@ function App() {
   const downloadMode = updaterInfo?.installMode === 'download';
   const updateSaved = Boolean(downloadedUpdate && downloadedUpdate.version === updaterInfo?.latestVersion);
   const [updatingApp, setUpdatingApp] = useState(false);
+  // "Update later": hides the card for this session only. The verified update stays staged and is offered again on the next launch.
+  const [laterVersion, setLaterVersion] = useState('');
+  const stagedReady = Boolean(updaterInfo?.staged && updaterInfo?.updateAvailable && updaterInfo?.installMode === 'install');
+  const backgroundStaging = Boolean(!updatingApp && !stagedReady && updaterInfo?.updateAvailable && updaterInfo?.installMode === 'install' && updaterProgress && updaterProgress.phase !== 'restarting' && updaterProgress.phase !== 'staged');
   const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewAuto, setReviewAuto] = useState(false);
   const [items, setItems] = useState([]);
@@ -56,7 +60,7 @@ function App() {
   const [dragActive, setDragActive] = useState(false);
   const [spotifyRequest, setSpotifyRequest] = useState({ url: '', sequence: 0 });
   const [aboutOpen, setAboutOpen] = useState(false);
-  const [appInfo, setAppInfo] = useState({ version: '2.1.2' });
+  const [appInfo, setAppInfo] = useState({ version: '2.1.7' });
   const [isReady, setIsReady] = useState(false);
   const [sidebarCompact, setSidebarCompact] = useState(() => {
     try { return localStorage.getItem('flickfetch-sidebar-compact') === 'true'; }
@@ -283,12 +287,13 @@ function App() {
     setUpdaterProgress({ phase: 'prepare', percent: 0 });
     try {
       const result = await window.flickfetch.updater.install();
+      if (result?.cancelled) { setUpdatingApp(false); setUpdaterProgress(null); return; }
       if (result?.downloaded) {
         // Installed builds cannot replace themselves: the verified release is saved and shown in its folder.
         setUpdatingApp(false); setUpdaterProgress(null);
-        setDownloadedUpdate({ version: result.version, filePath: result.filePath, transfer: result.transfer });
+        setDownloadedUpdate({ version: result.version, filePath: result.filePath, transfer: result.transfer, note: result.note || '' });
         window.flickfetch.app.revealPath?.(result.filePath)?.catch?.(() => {});
-        showToast('success', 'Update downloaded', `FlickFetch ${result.version} was verified and saved${result.transfer ? `. ${describeTransfer(result.transfer)}` : ''}. Close FlickFetch, then open the new file to switch.`);
+        showToast(result.note ? 'warning' : 'success', result.note ? 'Update saved, not installed' : 'Update downloaded', result.note ? `${result.note} The verified FlickFetch ${result.version} was saved instead. Close FlickFetch, then open the new file.` : `FlickFetch ${result.version} was verified and saved${result.transfer ? `. ${describeTransfer(result.transfer)}` : ''}. Close FlickFetch, then open the new file to switch.`);
       }
     } catch (error) { setUpdatingApp(false); setUpdaterProgress(null); showToast('error', downloadMode ? 'Update download failed' : 'FlickFetch update failed', error.message); }
   };
@@ -383,9 +388,9 @@ function App() {
           </div>
 
           <div className="sidebar-footer">
-          {updaterInfo?.updateAvailable && (updatingApp || updateSaved || dismissedUpdate !== String(updaterInfo.latestVersion)) && (
+          {updaterInfo?.updateAvailable && (updatingApp || updateSaved || (stagedReady ? laterVersion !== String(updaterInfo.latestVersion) : dismissedUpdate !== String(updaterInfo.latestVersion))) && (
             <div className="engine-card engine-ready engine-update app-release-card">
-              <div className="engine-card-top"><span className="engine-pulse" /><span>FLICKFETCH UPDATE</span>{updatingApp ? <Download size={14} /> : <button type="button" className="app-release-dismiss" onClick={() => dismissUpdateCard(updaterInfo.latestVersion)} title="Dismiss" aria-label="Dismiss update notice"><X size={14} /></button>}</div>
+              <div className="engine-card-top"><span className="engine-pulse" /><span>FLICKFETCH UPDATE</span>{updatingApp ? <Download size={14} /> : <button type="button" className="app-release-dismiss" onClick={() => (stagedReady ? setLaterVersion(String(updaterInfo.latestVersion)) : dismissUpdateCard(updaterInfo.latestVersion))} title={stagedReady ? 'Update later' : 'Dismiss'} aria-label="Dismiss update notice"><X size={14} /></button>}</div>
               <strong>Version {updaterInfo.latestVersion}</strong>
               {(() => {
                 const preview = summarizeNotes(updaterInfo.notes);
@@ -397,9 +402,11 @@ function App() {
                   </>
                 );
               })()}
-              {updatingApp && <div className="app-update-progress" role="status" aria-live="polite"><div><span>{UPDATE_PHASES[updaterProgress?.phase] || 'Preparing'}</span><b>{Math.max(0, Math.min(100, Number(updaterProgress?.percent || 0)))}%</b></div><progress max="100" value={Math.max(0, Math.min(100, Number(updaterProgress?.percent || 0)))} /></div>}
+              {(updatingApp || backgroundStaging) && <div className="app-update-progress" role="status" aria-live="polite"><div><span>{UPDATE_PHASES[updaterProgress?.phase] || 'Preparing'}</span><b>{Math.max(0, Math.min(100, Number(updaterProgress?.percent || 0)))}%</b></div><progress max="100" value={Math.max(0, Math.min(100, Number(updaterProgress?.percent || 0)))} /></div>}
               {updateSaved && !updatingApp
                 ? <><p>Saved and verified. Close FlickFetch, then open the new file to switch.</p><button onClick={showDownloadedUpdate}>Show in folder <ArrowUpRight size={14} /></button></>
+                : stagedReady && !updatingApp
+                  ? <><p>Downloaded and verified. FlickFetch restarts to finish; nothing is lost.</p><div className="app-release-actions"><button onClick={installFlickFetchUpdate}>Update now <ArrowUpRight size={14} /></button><button type="button" className="app-release-later" onClick={() => setLaterVersion(String(updaterInfo.latestVersion))}>Update later</button></div></>
                 : !updaterInfo.installMode
                   ? <button onClick={openUpdateDialog}>View details <ArrowUpRight size={14} /></button>
                   : <button onClick={installFlickFetchUpdate} disabled={updatingApp}>{updatingApp ? (downloadMode ? 'Downloading…' : 'Installing update…') : (downloadMode ? 'Download update' : 'Update FlickFetch')} <ArrowUpRight size={14} /></button>}
@@ -422,9 +429,9 @@ function App() {
               <button onClick={updateYtDlpNow} disabled={updatingYtDlp}>{updatingYtDlp ? 'Updating…' : 'Update now'} <ArrowUpRight size={14} /></button>
             </div>
           )}
-          <div className="sidebar-user" title={`FlickFetch desktop · v${appInfo.version || '2.1.2'}`}>
+          <div className="sidebar-user" title={`FlickFetch desktop · v${appInfo.version || '2.1.7'}`}>
             <div className="sidebar-avatar">FF</div>
-            <div className="sidebar-user-copy"><strong>FlickFetch desktop</strong><span>Version {appInfo.version || '2.1.2'}</span></div>
+            <div className="sidebar-user-copy"><strong>FlickFetch desktop</strong><span>Version {appInfo.version || '2.1.7'}</span></div>
             <ShieldCheck size={15} className="sidebar-security" />
           </div>
           </div>
@@ -442,7 +449,7 @@ function App() {
 
         <PreviewBar />
 
-        <footer className="app-statusbar"><div className="statusbar-left"><span className="statusbar-live"><i />{activeCount ? `${activeCount} task${activeCount === 1 ? '' : 's'} running` : 'All caught up'}</span><span className="status-separator" />{completedCount} completed <span className="status-separator" />{toolStatus?.complete ? 'All helper tools installed' : 'Helper tools may need setup'}</div><div className="statusbar-right"><span className="status-version">v{appInfo.version || '2.1.2'}</span></div></footer>
+        <footer className="app-statusbar"><div className="statusbar-left"><span className="statusbar-live"><i />{activeCount ? `${activeCount} task${activeCount === 1 ? '' : 's'} running` : 'All caught up'}</span><span className="status-separator" />{completedCount} completed <span className="status-separator" />{toolStatus?.complete ? 'All helper tools installed' : 'Helper tools may need setup'}</div><div className="statusbar-right"><span className="status-version">v{appInfo.version || '2.1.7'}</span></div></footer>
       </main>
       </div>
 

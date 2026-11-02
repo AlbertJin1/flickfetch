@@ -77,7 +77,7 @@ function runCapture(exe, args, cwd, timeout = 30000) {
 }
 
 async function downloadTo(url, destination, progress) {
-  const response = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': 'FlickFetch/2.1.2' } });
+  const response = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': 'FlickFetch/2.1.7' } });
   if (!response.ok || !response.body) throw new Error(`Download failed (${response.status} ${response.statusText}).`);
   const total = Number(response.headers.get('content-length')) || 0;
   const file = fs.createWriteStream(destination);
@@ -167,7 +167,7 @@ class ToolManager {
       try {
         await downloadTo(TOOL_URLS.ytDlp, temp, f => report('Downloading yt-dlp…', f * 0.9));
         report('Verifying yt-dlp checksum…', 0.94);
-        const sumsResponse = await fetch(TOOL_URLS.checksums, { headers: { 'User-Agent': 'FlickFetch/2.1.2' } });
+        const sumsResponse = await fetch(TOOL_URLS.checksums, { headers: { 'User-Agent': 'FlickFetch/2.1.7' } });
         if (!sumsResponse.ok) throw new Error('Unable to retrieve the official yt-dlp checksum list. The downloaded file was not installed.');
         const sums = await sumsResponse.text();
         const line = sums.split(/\r?\n/).find(row => /\s\*?yt-dlp\.exe\s*$/i.test(row.trim()));

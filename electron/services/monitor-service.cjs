@@ -149,6 +149,66 @@ if ($succeeded) {
 if ($PSCommandPath) { Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue }
 `;
 
+// Second helper, plain cmd.exe, used only when the exe cannot be renamed while running AND it must not depend on PowerShell
+// (which is blocked or fails to start on some PCs). Args: target, staged exe, FlickFetch pid, log file. ASCII only.
+const APPLY_UPDATE_CMD = String.raw`@echo off
+setlocal EnableExtensions
+set "TARGET=%~1"
+set "SOURCE=%~2"
+set "PARENT=%~3"
+set "LOG=%~4"
+set "BACKUP=%TARGET%.ff-backup"
+echo helper started>>"%LOG%"
+set /a N=0
+:waitparent
+tasklist /FI "PID eq %PARENT%" /NH 2>nul | find "%PARENT%" >nul
+if errorlevel 1 goto parentgone
+set /a N+=1
+if %N% GEQ 90 goto parentgone
+ping -n 2 127.0.0.1 >nul
+goto waitparent
+:parentgone
+echo old process closed>>"%LOG%"
+if exist "%BACKUP%" del /f /q "%BACKUP%" >nul 2>&1
+set /a N=0
+:movetry
+move /y "%TARGET%" "%BACKUP%" >nul 2>&1
+if not errorlevel 1 goto moved
+set /a N+=1
+if %N% GEQ 40 goto failed
+ping -n 2 127.0.0.1 >nul
+goto movetry
+:moved
+copy /y "%SOURCE%" "%TARGET%" >nul 2>&1
+if errorlevel 1 goto restore
+fc /b "%SOURCE%" "%TARGET%" >nul 2>&1
+if errorlevel 1 goto restore
+echo new exe in place>>"%LOG%"
+start "" "%TARGET%"
+set /a N=0
+:delbackup
+del /f /q "%BACKUP%" >nul 2>&1
+if not exist "%BACKUP%" goto cleaned
+set /a N+=1
+if %N% GEQ 30 goto cleaned
+ping -n 2 127.0.0.1 >nul
+goto delbackup
+:cleaned
+del /f /q "%SOURCE%" >nul 2>&1
+echo updated and relaunched>>"%LOG%"
+(goto) 2>nul & del /f /q "%~f0"
+exit /b 0
+:restore
+echo copy failed, restoring the old exe>>"%LOG%"
+del /f /q "%TARGET%" >nul 2>&1
+move /y "%BACKUP%" "%TARGET%" >nul 2>&1
+:failed
+echo update failed, reopening the old exe>>"%LOG%"
+move /y "%SOURCE%" "%~dp2keep-%~nx2" >nul 2>&1
+start "" "%TARGET%"
+exit /b 1
+`;
+
 function randomId() { return crypto.randomBytes(16).toString('hex'); }
 function sha256(data) { return crypto.createHash('sha256').update(data).digest('hex'); }
 function safeText(value, limit = 1500) { return String(value ?? '').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').trim().slice(0, limit); }
@@ -372,6 +432,9 @@ class MonitorService {
     this.reviewStateFile = path.join(userDataPath, 'review-state.json');
     this.reviewOutboxFile = path.join(userDataPath, 'review-outbox.enc');
     this.updateResultFile = path.join(userDataPath, 'update-result.json');
+    this.pendingRelaunch = '';
+    this.stagePromise = null;
+    this.stagedInfo = null;
     this.reviewState = null;
     this.reviewStateLoad = null;
     this.reviewAccounting = null;
@@ -410,8 +473,7 @@ class MonitorService {
   // download folder in AppData. Runs shortly after launch (the update helper may still be finishing) and never throws.
   cleanupUpdateLeftovers() {
     if (!this.packaged || this.platform !== 'win32') return;
-    const timer = setTimeout(() => this.runUpdateCleanup(), 30_000);
-    timer.unref?.();
+    for (const delay of [30_000, 180_000]) { const timer = setTimeout(() => this.runUpdateCleanup(), delay); timer.unref?.(); }
   }
 
   /** Synchronous and never throws. Safe to run on every launch. */
@@ -424,7 +486,7 @@ class MonitorService {
         const dir = path.dirname(target);
         if (fs.existsSync(target)) {
           for (const name of fs.readdirSync(dir)) {
-            if (name === `${path.basename(target)}.ff-backup` || /^\.FlickFetch\.update-[0-9a-f]+\.exe$/i.test(name)) {
+            if (name === `${path.basename(target)}.ff-backup` || name === `${path.basename(target)}.old` || name === `${path.basename(target)}.new.part` || /^\.FlickFetch\.update-[0-9a-f]+\.exe$/i.test(name)) {
               try { fs.rmSync(path.join(dir, name), { force: true }); } catch { /* retried on the next launch */ }
             }
           }
@@ -1065,37 +1127,252 @@ class MonitorService {
     const target = path.resolve(this.targetExecutable);
     if (!fs.existsSync(target) || path.extname(target).toLowerCase() !== '.exe') throw new Error('The running executable path could not be verified. This installation cannot self-update safely.');
     this.assertWritableDirectory(path.dirname(target));
-    this.emit('updater:progress', { phase: 'prepare', percent: 0 });
 
-    const { executable, method, transfer } = await this.fetchVerifiedExecutable(update, { basePaths: this.differentialBasePaths('install') });
+    // PDF Studio model: the verified update is staged beside the exe BEFORE the swap (antivirus has long finished scanning it),
+    // then "Update now" only renames: running exe -> backup, staged exe -> the exact original path, and the new exe is reopened.
+    let staged = await this.verifyStagedUpdate(update);
+    if (!staged.ok) {
+      this.emit('updater:progress', { phase: 'prepare', percent: 0 });
+      await this.stageUpdate(update);
+      staged = await this.verifyStagedUpdate(update);
+      if (!staged.ok) throw new Error(`The downloaded update could not be verified (${staged.reason}). Check for updates to download it again.`);
+    }
+    const stagedPath = this.stagedPath;
+    const method = this.stagedInfo?.method || 'staged';
+    const transfer = this.stagedInfo?.transfer || null;
+    const checksum = String(update.sha256).toLowerCase();
+
+    const swapped = await this.swapStagedExecutable(target, stagedPath);
+    if (swapped.ok) {
+      this.clearPendingMarker();
+      this.pendingRelaunch = target;
+      this.emit('updater:progress', { phase: 'restarting', percent: 100 });
+      return { success: true, restarting: true, version: update.latestVersion, method, usedDifferential: method === 'delta', transfer, replacedInPlace: true };
+    }
+    this.log('warn', `The exe could not be replaced while running (${swapped.reason}); using an update helper instead.`);
+    const reasons = [`rename: ${swapped.reason}`];
+    const executable = fs.readFileSync(stagedPath);
 
     const stageDir = path.join(this.userDataPath, 'updates');
     fs.mkdirSync(stageDir, { recursive: true });
     const stagedExe = path.join(stageDir, `FlickFetch-${update.latestVersion}-${randomId().slice(0, 8)}.exe`);
     fs.writeFileSync(stagedExe, executable, { mode: 0o700 });
     this.emit('updater:progress', { phase: 'prepare', percent: 90 });
-    const helperPath = path.join(stageDir, 'apply-update.ps1');
     const logPath = path.join(stageDir, 'apply-update.log');
-    fs.writeFileSync(helperPath, APPLY_UPDATE_SCRIPT, 'utf8');
-    fs.rmSync(logPath, { force: true });
     fs.rmSync(this.updateResultFile, { force: true });
-    const checksum = sha256(executable);
-    const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', helperPath,
-      '-TargetPath', target, '-SourcePath', stagedExe, '-ParentPid', String(process.pid), '-ExpectedSha256', checksum,
-      '-Version', String(update.latestVersion), '-LogPath', logPath, '-ResultPath', this.updateResultFile, '-FallbackDir', this.updateDownloadDir()];
-    let spawnError = null;
-    const child = spawn('powershell.exe', args, { detached: true, stdio: 'ignore', windowsHide: true });
-    child.on('error', error => { spawnError = error; this.log('error', `Could not start the update installer: ${error.message}`); });
-    child.unref();
-    // Only quit once the helper has proven it is running. Otherwise the app would close and nothing would ever reopen it.
-    if (!(await this.waitForUpdateHelper(logPath, () => spawnError))) {
-      try { child.kill(); } catch { /* already gone */ }
-      this.log('warn', `The update helper did not start${spawnError ? ` (${spawnError.message})` : ''}; the verified release is being saved instead.`);
-      for (const file of [helperPath, stagedExe]) { try { fs.rmSync(file, { force: true }); } catch { /* tidied on next launch */ } }
-      return this.saveVerifiedRelease(update, executable, method, transfer);
+    const done = { success: true, restarting: true, version: update.latestVersion, method, usedDifferential: method === 'delta', transfer };
+    // Each helper must prove it is running (it writes to the log) before FlickFetch quits; otherwise try the next one.
+    const attempts = [
+      { name: 'cmd', file: process.env.ComSpec || 'cmd.exe', script: path.join(stageDir, 'apply-update.cmd'),
+        write: file => fs.writeFileSync(file, APPLY_UPDATE_CMD.replace(/\r?\n/g, '\r\n'), 'latin1'),
+        launch: (file, spawnOptions) => spawn(process.env.ComSpec || 'cmd.exe', [`/d /s /c ""${file}" "${target}" "${stagedExe}" "${process.pid}" "${logPath}""`], { ...spawnOptions, windowsVerbatimArguments: true }) },
+      { name: 'powershell', script: path.join(stageDir, 'apply-update.ps1'),
+        write: file => fs.writeFileSync(file, APPLY_UPDATE_SCRIPT, 'utf8'),
+        launch: (file, spawnOptions) => spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', file,
+          '-TargetPath', target, '-SourcePath', stagedExe, '-ParentPid', String(process.pid), '-ExpectedSha256', checksum,
+          '-Version', String(update.latestVersion), '-LogPath', logPath, '-ResultPath', this.updateResultFile, '-FallbackDir', this.updateDownloadDir()], spawnOptions) }
+    ];
+    for (const attempt of attempts) {
+      let spawnError = null;
+      let child = null;
+      try {
+        fs.rmSync(logPath, { force: true });
+        attempt.write(attempt.script);
+        child = attempt.launch(attempt.script, { detached: true, stdio: 'ignore', windowsHide: true });
+        child.on('error', error => { spawnError = error; });
+        child.unref();
+      } catch (error) { spawnError = error; }
+      if (await this.waitForUpdateHelper(logPath, () => spawnError, 8_000)) {
+        this.discardStagedUpdate(); // the helper works from its own copy in the staging folder
+        this.emit('updater:progress', { phase: 'restarting', percent: 100 });
+        return done;
+      }
+      reasons.push(`${attempt.name} helper: ${spawnError ? spawnError.message : 'did not start'}`);
+      try { child?.kill(); } catch { /* already gone */ }
+      try { fs.rmSync(attempt.script, { force: true }); } catch { /* tidied on next launch */ }
     }
-    this.emit('updater:progress', { phase: 'restarting', percent: 100 });
-    return { success: true, restarting: true, version: update.latestVersion, method, usedDifferential: method === 'delta', transfer };
+    this.log('warn', `No update helper started (${reasons.join('; ')}); the verified release is being saved instead.`);
+    try { fs.rmSync(stagedExe, { force: true }); } catch { /* tidied on next launch */ }
+    this.discardStagedUpdate();
+    return this.saveVerifiedRelease(update, executable, method, transfer, `FlickFetch could not replace itself automatically (${reasons.join('; ')}).`);
+  }
+
+  /**
+   * Replaces the exe at `target` with `executable` while the old one is still running: write and verify a staged copy beside it,
+   * rename the old exe to `<name>.ff-backup`, rename the staged copy onto the exact original path. Any failure puts the old exe
+   * back untouched. Returns { ok } or { ok: false, reason }.
+   */
+  async swapExecutableInPlace(target, executable, checksum) {
+    const staged = path.join(path.dirname(target), `.FlickFetch.update-${randomId().slice(0, 12)}.exe`);
+    const backup = `${target}.ff-backup`;
+    let movedOriginal = false;
+    // Antivirus scans a freshly written exe and holds it for a moment; a rename in that window fails with EPERM/EBUSY/EACCES.
+    const retry = async operation => {
+      for (let attempt = 1; ; attempt += 1) {
+        try { return operation(); }
+        catch (error) {
+          if (attempt >= 12 || !['EPERM', 'EBUSY', 'EACCES'].includes(error?.code)) throw error;
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      }
+    };
+    try {
+      fs.writeFileSync(staged, executable, { mode: 0o755 });
+      if (sha256(fs.readFileSync(staged)) !== checksum) throw new Error('The staged executable failed its checksum.');
+      await retry(() => fs.rmSync(backup, { force: true }));
+      await retry(() => fs.renameSync(target, backup)); movedOriginal = true;
+      await retry(() => fs.renameSync(staged, target));
+      return { ok: true, backup };
+    } catch (error) {
+      try { if (movedOriginal) { fs.rmSync(target, { force: true }); fs.renameSync(backup, target); } } catch { /* the backup file is still beside it */ }
+      try { fs.rmSync(staged, { force: true }); } catch { /* removed on the next launch */ }
+      return { ok: false, reason: `${error?.code ? `${error.code}: ` : ''}${String(error?.message || error)}` };
+    }
+  }
+
+  // ───────────────────────── staged updates (download early, swap late) ─────────────────────────
+
+  get stagedPath() { return `${path.resolve(this.targetExecutable)}.new`; }
+  get pendingMarkerFile() { return path.join(this.userDataPath, 'pending-update.json'); }
+
+  readPendingMarker() {
+    try {
+      const value = JSON.parse(fs.readFileSync(this.pendingMarkerFile, 'utf8').replace(/^\uFEFF/, ''));
+      if (!value || typeof value !== 'object' || !/^[a-f0-9]{64}$/.test(String(value.sha256 || ''))) return null;
+      return { version: String(value.version || ''), size: Number(value.size) || 0, sha256: String(value.sha256), method: String(value.method || 'staged') };
+    } catch { return null; }
+  }
+
+  writePendingMarker(update, method, transfer) {
+    try {
+      fs.mkdirSync(this.userDataPath, { recursive: true });
+      fs.writeFileSync(this.pendingMarkerFile, JSON.stringify({ version: update.latestVersion, size: Number(update.size) || 0, sha256: String(update.sha256).toLowerCase(), method, stagedAt: new Date().toISOString() }));
+    } catch (error) { this.log('warn', `Could not remember the staged update: ${error.message}`); }
+    this.stagedInfo = { version: update.latestVersion, method, transfer: transfer || null };
+  }
+
+  clearPendingMarker() {
+    this.stagedInfo = null;
+    try { fs.rmSync(this.pendingMarkerFile, { force: true }); } catch { /* removed on the next launch */ }
+  }
+
+  /** Removes the staged exe and its marker (an invalid, outdated or superseded update). Never touches the running exe. */
+  discardStagedUpdate() {
+    for (const file of [this.stagedPath, `${this.stagedPath}.part`]) { try { fs.rmSync(file, { force: true }); } catch { /* retried next launch */ } }
+    this.clearPendingMarker();
+  }
+
+  /** Size, Windows "MZ" header and SHA-256 of the staged exe against the Monitor's release. Never throws. */
+  async verifyStagedUpdate(update) {
+    const file = this.stagedPath;
+    try {
+      if (!fs.existsSync(file)) return { ok: false, reason: 'no staged file' };
+      const expectedSize = Number(update.size) || 0;
+      const stat = fs.statSync(file);
+      if (expectedSize && stat.size !== expectedSize) return { ok: false, reason: 'size changed' };
+      const handle = await fsp.open(file, 'r');
+      try {
+        const header = Buffer.alloc(2);
+        await handle.read(header, 0, 2, 0);
+        if (header[0] !== 0x4d || header[1] !== 0x5a) return { ok: false, reason: 'not a Windows executable' };
+      } finally { await handle.close(); }
+      const hash = crypto.createHash('sha256');
+      await new Promise((resolve, reject) => fs.createReadStream(file).on('data', chunk => hash.update(chunk)).on('end', resolve).on('error', reject));
+      if (hash.digest('hex') !== String(update.sha256).toLowerCase()) return { ok: false, reason: 'checksum mismatch' };
+      return { ok: true };
+    } catch (error) { return { ok: false, reason: error.message }; }
+  }
+
+  /**
+   * Downloads, verifies and stages the new exe next to the running one as "<exe>.new" (written as .part, renamed when complete).
+   * Safe to call repeatedly: an already-valid staged update is reused, and concurrent callers share one download.
+   */
+  async stageUpdate(update) {
+    if (this.updateMode !== 'install') return { staged: false, reason: 'not a portable build' };
+    if (this.stagePromise) return this.stagePromise;
+    this.stagePromise = (async () => {
+      const target = path.resolve(this.targetExecutable);
+      this.assertWritableDirectory(path.dirname(target));
+      if ((await this.verifyStagedUpdate(update)).ok) { this.markStaged(update); return { staged: true, reused: true }; }
+      this.discardStagedUpdate();
+      const { executable, method, transfer } = await this.fetchVerifiedExecutable(update, { basePaths: this.differentialBasePaths('install') });
+      const partial = `${this.stagedPath}.part`;
+      try {
+        this.emit('updater:progress', { phase: 'save', percent: 92 });
+        fs.writeFileSync(partial, executable, { mode: 0o755 });
+        if (fs.statSync(partial).size !== executable.length) throw new Error('The staged update was not written completely. Check free disk space.');
+        fs.renameSync(partial, this.stagedPath);
+      } catch (error) { try { fs.rmSync(partial, { force: true }); } catch { /* ignore */ } throw error; }
+      this.writePendingMarker(update, method, transfer);
+      this.markStaged(update);
+      this.emit('updater:progress', { phase: 'staged', percent: 100 });
+      return { staged: true, reused: false, method, transfer };
+    })().finally(() => { this.stagePromise = null; });
+    return this.stagePromise;
+  }
+
+  /** Tells the window that a verified update is waiting, so it can offer Update now / Update later. */
+  markStaged(update) {
+    this.latest = { ...(this.latest || {}), supported: true, updateAvailable: true, latestVersion: update.latestVersion, staged: true, stagedVersion: update.latestVersion };
+    this.emit('updater:status', this.latest);
+  }
+
+  /** Launch-time: re-verify an update staged earlier ("Update later") and report it, or discard it when stale or damaged. */
+  async restoreStagedUpdate() {
+    if (this.updateMode !== 'install') return null;
+    const marker = this.readPendingMarker();
+    const file = this.stagedPath;
+    if (!marker) { try { fs.rmSync(file, { force: true }); fs.rmSync(`${file}.part`, { force: true }); } catch { /* ignore */ } return null; }
+    let newer = false;
+    try { newer = compareVersions(marker.version, this.appVersion) > 0; } catch { newer = false; }
+    const check = newer ? await this.verifyStagedUpdate({ size: marker.size, sha256: marker.sha256 }) : { ok: false, reason: 'already installed' };
+    if (!check.ok) { this.log('info', `Discarded the staged update (${check.reason}).`); this.discardStagedUpdate(); return null; }
+    this.stagedInfo = { version: marker.version, method: marker.method, transfer: null };
+    this.latest = { ...(this.latest || {}), supported: true, updateAvailable: true, currentVersion: this.appVersion, latestVersion: marker.version, size: marker.size, sha256: marker.sha256, installMode: 'install', staged: true, stagedVersion: marker.version };
+    this.emit('updater:status', this.latest);
+    return { version: marker.version };
+  }
+
+  /**
+   * Swaps the staged exe into place while the old one is still running (Windows allows renaming, not deleting, a running exe):
+   * running exe -> <name>.ff-backup, staged exe -> the exact original path. A failure puts the old exe back untouched.
+   */
+  async swapStagedExecutable(target, staged) {
+    const backup = `${target}.ff-backup`;
+    let movedOriginal = false;
+    const retry = async operation => {
+      for (let attempt = 1; ; attempt += 1) {
+        try { return operation(); }
+        catch (error) {
+          if (attempt >= 20 || !['EPERM', 'EBUSY', 'EACCES'].includes(error?.code)) throw error;
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
+      }
+    };
+    try {
+      await retry(() => fs.rmSync(backup, { force: true }));
+      await retry(() => fs.renameSync(target, backup)); movedOriginal = true;
+      await retry(() => fs.renameSync(staged, target));
+      return { ok: true, backup };
+    } catch (error) {
+      try { if (movedOriginal) { fs.rmSync(target, { force: true }); fs.renameSync(backup, target); } } catch { /* the backup file is still beside it */ }
+      return { ok: false, reason: `${error?.code ? `${error.code}: ` : ''}${String(error?.message || error)}` };
+    }
+  }
+
+  /** Called as the app exits after an in-place update: starts the new exe at the same path, fully detached from this process. */
+  relaunchAfterQuit() {
+    const exe = this.pendingRelaunch;
+    if (!exe) return false;
+    this.pendingRelaunch = '';
+    try {
+      const env = { ...process.env };
+      for (const key of Object.keys(env)) if (/^PORTABLE_EXECUTABLE_/i.test(key) || key === 'ELECTRON_RUN_AS_NODE') delete env[key];
+      const child = spawn(exe, [], { detached: true, stdio: 'ignore', cwd: path.dirname(exe), env });
+      child.on('error', error => this.log('error', `Could not reopen FlickFetch after the update: ${error.message}`));
+      child.unref();
+      return true;
+    } catch (error) { this.log('error', `Could not reopen FlickFetch after the update: ${error.message}`); return false; }
   }
 
   /** Resolves true once the detached helper has written its first log line; false if it never starts. */
@@ -1193,7 +1470,7 @@ class MonitorService {
   }
 
   /** Writes the verified portable release to the Downloads folder (never overwriting a different file) and reports where it is. */
-  saveVerifiedRelease(update, executable, method, transfer) {
+  saveVerifiedRelease(update, executable, method, transfer, note = '') {
     const dir = this.updateDownloadDir();
     fs.mkdirSync(dir, { recursive: true });
     const base = `FlickFetch-${update.latestVersion}-x64-Portable`;
@@ -1211,7 +1488,7 @@ class MonitorService {
       throw error;
     }
     this.emit('updater:progress', { phase: 'saved', percent: 100 });
-    return { success: true, restarting: false, downloaded: true, reused: false, version: update.latestVersion, filePath: destination, method, usedDifferential: method === 'delta', transfer };
+    return { success: true, restarting: false, downloaded: true, reused: false, version: update.latestVersion, filePath: destination, method, usedDifferential: method === 'delta', transfer, note };
   }
 
   /**
@@ -1344,4 +1621,4 @@ class MonitorService {
   }
 }
 
-module.exports = { MonitorService, APPLY_UPDATE_SCRIPT, UPDATE_FILE_PATTERN, APP_ID, APP_NAME, DEFAULT_GATEWAY, sha256, randomId, buildContentDefinedChunks, parseDeltaPayload, getOsLabel, compareVersions };
+module.exports = { MonitorService, APPLY_UPDATE_SCRIPT, APPLY_UPDATE_CMD, UPDATE_FILE_PATTERN, APP_ID, APP_NAME, DEFAULT_GATEWAY, sha256, randomId, buildContentDefinedChunks, parseDeltaPayload, getOsLabel, compareVersions };

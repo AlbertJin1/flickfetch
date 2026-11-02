@@ -7,7 +7,7 @@ const zlib = require('node:zlib');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { MonitorService, APPLY_UPDATE_SCRIPT, APP_ID, DEFAULT_GATEWAY, sha256, randomId, buildContentDefinedChunks, parseDeltaPayload, getOsLabel, compareVersions } = require('../electron/services/monitor-service.cjs');
+const { MonitorService, APPLY_UPDATE_SCRIPT, APPLY_UPDATE_CMD, APP_ID, DEFAULT_GATEWAY, sha256, randomId, buildContentDefinedChunks, parseDeltaPayload, getOsLabel, compareVersions } = require('../electron/services/monitor-service.cjs');
 const { monitorApiUrlCandidates, isMonitorApiUrl } = require('../electron/services/monitor-api.cjs');
 
 function makeDelta(chunks) {
@@ -617,6 +617,153 @@ test('cleanup keeps the only copy of an unapplied release for a week', () => {
     service.runUpdateCleanup();
     assert.equal(fs.existsSync(stale), false);
     assert.equal(fs.existsSync(kept), true);
+  } finally {
+    if (previous === undefined) delete process.env.PORTABLE_EXECUTABLE_FILE; else process.env.PORTABLE_EXECUTABLE_FILE = previous;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a portable update replaces the running exe in place, keeps its name, and relaunches that same path', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'flickfetch-inplace-'));
+  const previous = process.env.PORTABLE_EXECUTABLE_FILE;
+  try {
+    const exePath = path.join(directory, 'My Downloader.exe'); // a renamed exe
+    fs.writeFileSync(exePath, 'old-version');
+    process.env.PORTABLE_EXECUTABLE_FILE = exePath;
+    const exe = Buffer.concat([Buffer.from('MZ'), crypto.randomBytes(4096)]);
+    const hash = sha256(exe);
+    const service = new MonitorService({ app: { getPath: () => path.join(directory, 'Downloads') }, appVersion: '2.1.3', userDataPath: path.join(directory, 'data'), packaged: true, platform: 'win32' });
+    service.installId = '4'.repeat(32);
+    assert.equal(service.updateMode, 'install');
+    const handler = async url => {
+      if (new URL(url).searchParams.get('action') === 'latest') return jsonResponse(200, { ok: true, update_available: true, latest: { version: '2.1.4', notes: 'New', size: exe.length, sha256: hash } });
+      return new Response(exe, { status: 200, headers: { 'content-type': 'application/octet-stream', 'content-length': String(exe.length) } });
+    };
+    await withFetch(handler, async () => {
+      const result = await service.downloadAndInstallUpdate();
+      assert.equal(result.restarting, true);
+      assert.equal(result.replacedInPlace, true);
+    });
+    // The new build now lives at the exact old path; the old exe waits beside it as .ff-backup; nothing else is left over.
+    assert.equal(sha256(fs.readFileSync(exePath)), hash);
+    assert.equal(fs.readFileSync(`${exePath}.ff-backup`, 'utf8'), 'old-version');
+    assert.deepEqual(fs.readdirSync(directory).filter(name => name.startsWith('.FlickFetch.update-')), []);
+    assert.equal(service.pendingRelaunch, exePath);
+    // The next launch deletes the backup and never touches the new exe.
+    service.runUpdateCleanup();
+    assert.equal(fs.existsSync(`${exePath}.ff-backup`), false);
+    assert.equal(sha256(fs.readFileSync(exePath)), hash);
+  } finally {
+    if (previous === undefined) delete process.env.PORTABLE_EXECUTABLE_FILE; else process.env.PORTABLE_EXECUTABLE_FILE = previous;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('an in-place swap that cannot finish puts the old exe back untouched', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'flickfetch-swapfail-'));
+  try {
+    const service = new MonitorService({ app: {}, appVersion: '2.1.3', userDataPath: directory, packaged: true, platform: 'win32' });
+    const exePath = path.join(directory, 'FlickFetch.exe');
+    fs.writeFileSync(exePath, 'old-version');
+    const bad = await service.swapExecutableInPlace(exePath, Buffer.from('new-version'), 'f'.repeat(64)); // wrong checksum
+    assert.equal(bad.ok, false);
+    assert.equal(fs.readFileSync(exePath, 'utf8'), 'old-version');
+    assert.deepEqual(fs.readdirSync(directory).sort(), ['FlickFetch.exe']);
+    const missing = await service.swapExecutableInPlace(path.join(directory, 'gone.exe'), Buffer.from('x'), sha256(Buffer.from('x')));
+    assert.equal(missing.ok, false);
+    assert.deepEqual(fs.readdirSync(directory).sort(), ['FlickFetch.exe']);
+    assert.equal(service.relaunchAfterQuit(), false);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('the cmd helper handshakes, moves the exe aside, and keeps the new copy if the swap fails', () => {
+  assert.match(APPLY_UPDATE_CMD, /echo helper started>>"%LOG%"/);
+  assert.match(APPLY_UPDATE_CMD, /move \/y "%TARGET%" "%BACKUP%"/);
+  assert.match(APPLY_UPDATE_CMD, /copy \/y "%SOURCE%" "%TARGET%"/);
+  assert.match(APPLY_UPDATE_CMD, /start "" "%TARGET%"/);
+  assert.match(APPLY_UPDATE_CMD, /keep-%~nx2/);
+  assert.doesNotMatch(APPLY_UPDATE_CMD, /[^\x00-\x7F]/);
+});
+
+test('staged update: downloaded early beside the exe, re-verified on the next launch, and applied with a plain rename', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'flickfetch-staged-'));
+  const previous = process.env.PORTABLE_EXECUTABLE_FILE;
+  try {
+    const exePath = path.join(directory, 'FlickFetch.exe');
+    fs.writeFileSync(exePath, 'old-version');
+    process.env.PORTABLE_EXECUTABLE_FILE = exePath;
+    const exe = Buffer.concat([Buffer.from('MZ'), crypto.randomBytes(4096)]);
+    const hash = sha256(exe);
+    const make = () => new MonitorService({ app: { getPath: () => path.join(directory, 'Downloads') }, appVersion: '2.1.4', userDataPath: path.join(directory, 'data'), packaged: true, platform: 'win32' });
+    let downloads = 0;
+    const handler = async url => {
+      if (new URL(url).searchParams.get('action') === 'latest') return jsonResponse(200, { ok: true, update_available: true, latest: { version: '2.1.5', notes: 'New', size: exe.length, sha256: hash } });
+      downloads += 1;
+      return new Response(exe, { status: 200, headers: { 'content-type': 'application/octet-stream', 'content-length': String(exe.length) } });
+    };
+    await withFetch(handler, async () => {
+      // 1) Background stage: the verified exe appears beside the running one; the running exe is untouched.
+      const first = make(); first.installId = '5'.repeat(32);
+      const info = await first.checkForUpdates();
+      const staged = await first.stageUpdate(info);
+      assert.equal(staged.staged, true);
+      assert.equal(sha256(fs.readFileSync(`${exePath}.new`)), hash);
+      assert.equal(fs.readFileSync(exePath, 'utf8'), 'old-version');
+      assert.equal(first.latest.staged, true);
+
+      // 2) "Update later": a new launch re-verifies the staged file and offers it again without downloading anything.
+      const second = make(); second.installId = '5'.repeat(32);
+      const seen = []; second.emit = (name, payload) => { if (name === 'updater:status') seen.push(payload); };
+      assert.deepEqual(await second.restoreStagedUpdate(), { version: '2.1.5' });
+      assert.equal(seen.at(-1).staged, true);
+      const before = downloads;
+
+      // 3) "Update now": only renames. No second download, backup beside it, staged file consumed, relaunch armed.
+      const result = await second.downloadAndInstallUpdate();
+      assert.equal(result.restarting, true);
+      assert.equal(result.replacedInPlace, true);
+      assert.equal(downloads, before);
+      assert.equal(sha256(fs.readFileSync(exePath)), hash);
+      assert.equal(fs.readFileSync(`${exePath}.ff-backup`, 'utf8'), 'old-version');
+      assert.equal(fs.existsSync(`${exePath}.new`), false);
+      assert.equal(fs.existsSync(path.join(directory, 'data', 'pending-update.json')), false);
+      assert.equal(second.pendingRelaunch, exePath);
+    });
+  } finally {
+    if (previous === undefined) delete process.env.PORTABLE_EXECUTABLE_FILE; else process.env.PORTABLE_EXECUTABLE_FILE = previous;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a tampered, truncated or outdated staged update is discarded at launch instead of being offered', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'flickfetch-staged-bad-'));
+  const previous = process.env.PORTABLE_EXECUTABLE_FILE;
+  try {
+    const exePath = path.join(directory, 'FlickFetch.exe');
+    fs.writeFileSync(exePath, 'old-version');
+    process.env.PORTABLE_EXECUTABLE_FILE = exePath;
+    const exe = Buffer.concat([Buffer.from('MZ'), crypto.randomBytes(2048)]);
+    const marker = path.join(directory, 'data', 'pending-update.json');
+    const service = new MonitorService({ app: { getPath: () => path.join(directory, 'Downloads') }, appVersion: '2.1.4', userDataPath: path.join(directory, 'data'), packaged: true, platform: 'win32' });
+    fs.mkdirSync(path.join(directory, 'data'), { recursive: true });
+    const writeMarker = version => fs.writeFileSync(marker, JSON.stringify({ version, size: exe.length, sha256: sha256(exe), method: 'full' }));
+    // tampered content, same size
+    fs.writeFileSync(`${exePath}.new`, Buffer.concat([Buffer.from('MZ'), crypto.randomBytes(2048)])); writeMarker('2.1.5');
+    assert.equal(await service.restoreStagedUpdate(), null);
+    assert.equal(fs.existsSync(`${exePath}.new`), false); assert.equal(fs.existsSync(marker), false);
+    // truncated
+    fs.writeFileSync(`${exePath}.new`, exe.subarray(0, 100)); writeMarker('2.1.5');
+    assert.equal(await service.restoreStagedUpdate(), null); assert.equal(fs.existsSync(`${exePath}.new`), false);
+    // already installed (not newer than the running version)
+    fs.writeFileSync(`${exePath}.new`, exe); writeMarker('2.1.4');
+    assert.equal(await service.restoreStagedUpdate(), null); assert.equal(fs.existsSync(`${exePath}.new`), false);
+    // an intact newer one is kept
+    fs.writeFileSync(`${exePath}.new`, exe); writeMarker('2.1.5');
+    assert.deepEqual(await service.restoreStagedUpdate(), { version: '2.1.5' }); assert.equal(fs.existsSync(`${exePath}.new`), true);
+    // cleanup never deletes a postponed update
+    service.runUpdateCleanup();
+    assert.equal(fs.existsSync(`${exePath}.new`), true);
+    assert.equal(fs.readFileSync(exePath, 'utf8'), 'old-version');
   } finally {
     if (previous === undefined) delete process.env.PORTABLE_EXECUTABLE_FILE; else process.env.PORTABLE_EXECUTABLE_FILE = previous;
     fs.rmSync(directory, { recursive: true, force: true });

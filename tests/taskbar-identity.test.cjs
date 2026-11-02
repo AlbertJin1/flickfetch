@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { APP_ID, isFlickFetchShortcut, repairPinnedShortcuts, applyWindowIdentity, launcherPath, pinnedTaskbarDir } = require('../electron/services/taskbar-identity.cjs');
+const { APP_ID, DISPLAY_NAME, isFlickFetchShortcut, repairPinnedShortcuts, applyWindowIdentity, launcherPath, pinnedTaskbarDir } = require('../electron/services/taskbar-identity.cjs');
 
 function pinnedFolder(links) {
   const appData = fs.mkdtempSync(path.join(os.tmpdir(), 'ff-pins-'));
@@ -38,11 +38,11 @@ test('a pinned FlickFetch shortcut without an app ID is linked; others are untou
   });
   const fixed = repairPinnedShortcuts({ shell, env, launcher: 'D:\\Apps\\FlickFetch.exe' });
   assert.equal(fixed, 1);
-  assert.deepEqual(written, [{ name: 'FlickFetch.lnk', op: 'update', props: { appUserModelId: APP_ID } }]);
+  assert.deepEqual(written, [{ name: 'FlickFetch.lnk', op: 'update', props: { appUserModelId: APP_ID, description: DISPLAY_NAME } }]);
 });
 
 test('an already-linked shortcut is not rewritten, and a missing folder is fine', () => {
-  const ok = pinnedFolder({ 'FlickFetch.lnk': { target: 'D:\\Apps\\FlickFetch.exe', appUserModelId: APP_ID } });
+  const ok = pinnedFolder({ 'FlickFetch.lnk': { target: 'D:\\Apps\\FlickFetch.exe', appUserModelId: APP_ID, description: DISPLAY_NAME } });
   assert.equal(repairPinnedShortcuts({ shell: ok.shell, env: ok.env, launcher: 'D:\\Apps\\FlickFetch.exe' }), 0);
   assert.equal(ok.written.length, 0);
   assert.equal(repairPinnedShortcuts({ shell: ok.shell, env: { APPDATA: path.join(os.tmpdir(), 'ff-missing-' + Date.now()) } }), 0);
@@ -59,4 +59,12 @@ test('window identity points relaunch at the real exe and never throws', () => {
   assert.equal(applyWindowIdentity({ isDestroyed: () => true }), false);
   assert.equal(applyWindowIdentity({ isDestroyed: () => false, setAppDetails() { throw new Error('x'); } }), false);
   assert.equal(applyWindowIdentity(null), false);
+});
+
+test('a shortcut pinned from an older build has its long hover text replaced with just the title', () => {
+  const { env, shell, written } = pinnedFolder({
+    'FlickFetch.lnk': { target: 'D:\\Apps\\FlickFetch.exe', appUserModelId: APP_ID, description: 'FlickFetch desktop media downloader built with React, Electron and yt-dlp' }
+  });
+  assert.equal(repairPinnedShortcuts({ shell, env, launcher: 'D:\\Apps\\FlickFetch.exe' }), 1);
+  assert.deepEqual(written, [{ name: 'FlickFetch.lnk', op: 'update', props: { appUserModelId: APP_ID, description: DISPLAY_NAME } }]);
 });

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef } from 'react';
 import { describeTransfer } from '../lib/format.js';
 import { ArrowUpRight, Check, CircleAlert, CloudOff, Download, FlaskConical, FolderOpen, RefreshCw, X } from 'lucide-react';
 
-const PHASES = { prepare: 'Preparing', manifest: 'Checking release', differential: 'Comparing files', download: 'Downloading', verify: 'Verifying', reconstruct: 'Rebuilding', save: 'Saving', saved: 'Saved', restarting: 'Restarting' };
+const PHASES = { prepare: 'Preparing', manifest: 'Checking release', differential: 'Comparing files', download: 'Downloading', verify: 'Verifying', reconstruct: 'Rebuilding', save: 'Saving', saved: 'Saved', staged: 'Ready', restarting: 'Restarting' };
 const FOCUSABLE = 'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
 function buildLabel(info, appInfo) {
@@ -58,6 +58,7 @@ export default function UpdateDialog({ info, appInfo = {}, checking, error, inst
   const state = deriveState({ info, checking, error });
   const downloadMode = info?.installMode === 'download';
   const canInstall = state === 'available' && Boolean(info?.installMode);
+  const stagedReady = Boolean(info?.staged && info?.installMode === 'install');
   const percent = Math.max(0, Math.min(100, Number(progress?.percent || 0)));
   const currentVersion = info?.currentVersion || appInfo.version || '';
   const notes = useMemo(() => parseNotes(info?.notes), [info?.notes]);
@@ -86,7 +87,7 @@ export default function UpdateDialog({ info, appInfo = {}, checking, error, inst
     checking: { icon: <RefreshCw size={26} className="update-spin" />, title: 'Checking for updates…', text: 'Contacting the FlickFetch Monitor for the latest release.' },
     error: { icon: <CloudOff size={26} />, title: 'Couldn’t check for updates', text: error || 'The FlickFetch Monitor could not be reached. Check your connection and try again.' },
     unavailable: { icon: <CircleAlert size={26} />, title: 'Updates unavailable', text: info?.message || 'Updates can’t be checked on this platform.' },
-    available: { icon: <Download size={26} />, title: `Version ${info?.latestVersion} is available`, text: downloadMode ? 'FlickFetch will download and verify the new release; you then open the new file to switch.' : info?.installMode ? 'FlickFetch will download, verify, and restart into the new version.' : 'A newer release is published. Development builds can’t install it, so grab it from a packaged build.' },
+    available: { icon: <Download size={26} />, title: `Version ${info?.latestVersion} is available`, text: downloadMode ? 'FlickFetch will download and verify the new release; you then open the new file to switch.' : info?.installMode ? (info?.staged ? 'The update is already downloaded and verified. Update now restarts FlickFetch into it; Update later keeps it ready for the next launch.' : 'FlickFetch downloads and verifies the update in the background, then asks you before it restarts.') : 'A newer release is published. Development builds can’t install it, so grab it from a packaged build.' },
     ahead: { icon: <FlaskConical size={26} />, title: 'You’re ahead of the latest release', text: `This build (${currentVersion}) is newer than the latest published release (${info?.latestVersion}). It’s the latest unreleased version.` },
     none: { icon: <Check size={26} />, title: info?.releaseState === 'rollout_blocked' ? 'Rollout in progress' : 'No release published yet', text: info?.message || 'There is nothing to update to right now.' },
     current: { icon: <Check size={26} />, title: 'FlickFetch is up to date', text: `You’re running the latest release${currentVersion ? `, version ${currentVersion}` : ''}.` }
@@ -146,6 +147,7 @@ export default function UpdateDialog({ info, appInfo = {}, checking, error, inst
         {savedUpdate && !installing && state === 'available' && (
           <p className="update-saved"><Check size={14} /> Saved and verified. {describeTransfer(savedUpdate.transfer)}{savedUpdate.transfer ? '. ' : ''}Close FlickFetch, then open the new file to switch.</p>
         )}
+        {savedUpdate?.note && !installing && state === 'available' && <p className="update-note">{savedUpdate.note}</p>}
 
         <footer className="update-actions">
           <span className="update-checked">{checking ? '' : checkedAt ? `Last checked ${checkedAt}` : ''}</span>

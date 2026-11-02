@@ -1,12 +1,50 @@
 # FlickFetch Changelog
 
-## [2.1.2] - 2026-11-02
+## [2.1.7] - 2026-11-02
+
+### Fixed
+- Opening the review window no longer lights up the 1-star button. The first star used to receive keyboard focus, which the dialog treated as hovering it. Focus now goes to the dialog itself, and stars only highlight under the mouse or the chosen rating.
+
+### Improved (review window)
+- The stars are a proper rating group: arrow keys, Home/End or the keys 1-5 pick a rating, and Tab moves on to the next field.
+- A clear focus ring shows keyboard position without changing the rating preview.
+- Tab stays inside the window, Escape closes it, and Ctrl+Enter submits.
+- The feedback box shows a character counter, and the error clears once you choose a rating.
+
+## [2.1.6] - 2026-11-02
+
+### Fixed (portable updater, now modelled on PDF Studio)
+- The update is downloaded and verified in the background and kept beside the exe as `<name>.new` *before* you press Update. Pressing **Update now** then only renames files (running exe to `.ff-backup`, the verified `.new` onto the exact original path) and reopens it. Before, the new exe was written and renamed in the same instant, which antivirus scanning could block, so the update fell through to the helpers or to `Downloads\FlickFetch Updates`.
+- **Update later** keeps the verified update staged. On the next launch FlickFetch re-checks its size, Windows header and SHA-256 and offers it again; a damaged, truncated or already-installed one is discarded.
+- If downloads are still running, **Update now** asks first instead of stopping them silently.
+- The cmd and PowerShell helpers and the saved copy in `Downloads\FlickFetch Updates` remain as fallbacks, now fed from the already verified staged file.
+- Cleanup never deletes a postponed update, and removes leftover `.old`, `.ff-backup` and `.new.part` files.
+
+## [2.1.5] - 2026-11-02
+
+### Fixed
+- Making the in-place update more reliable: the exe rename retries for a few seconds when antivirus is still scanning the new file.
+- If the exe still cannot be renamed, a plain `cmd.exe` helper (no PowerShell) swaps and reopens it, then the PowerShell helper is tried, and only then is the verified file saved to `Downloads\FlickFetch Updates`.
+- When an update could not be installed automatically, the message now says exactly why (for example `rename: EPERM ...`), so a failure can be diagnosed.
+
+## [2.1.4] - 2026-11-02
+
+### Fixed
+- Updating the portable exe now replaces the exe you opened, at the same path and with the same name, and reopens it. It no longer depends on a background PowerShell helper (which did not start on some PCs, leaving the new version in `Downloads\FlickFetch Updates`). The old exe is renamed to `.ff-backup` while the app runs and deleted by the new version a few seconds after it opens.
+- The PowerShell helper is now only a backup for when the exe cannot be renamed, and the saved copy in `Downloads\FlickFetch Updates` is the last resort.
+
+## [2.1.3] - 2026-11-02
+
+### Fixed
+- A FlickFetch icon pinned to the taskbar from an older build no longer shows the long description when you hover it while FlickFetch is closed. It shows only "Flick Fetch". The old text was stored inside the pinned shortcut; FlickFetch now rewrites it on launch. If Windows still shows the old text, restart Windows Explorer or unpin and re-pin once.
 
 ### Fixed (update restart)
 - The update helper now proves it is running before FlickFetch closes. If it cannot start, FlickFetch stays open and saves the verified update to `Downloads\FlickFetch Updates` (shown in its folder) instead of closing with nothing reopening.
 - The helper confirms the new version stays open for a few seconds before it deletes the old exe.
 - If the exe cannot be replaced in place, the old exe is restored, the new version is started from `Downloads\FlickFetch Updates`, and the next launch shows a message saying where it is. As a last resort the old version is reopened and the new file is shown.
 - Helper progress is logged to `%LOCALAPPDATA%\FlickFetch\updates\apply-update.log`.
+
+## [2.1.2] - 2026-11-02
 
 ### Changed
 - Downloads are saved as "Title.mp3" now, without the video id in brackets.
