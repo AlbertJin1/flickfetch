@@ -2,6 +2,12 @@
 
 ## [2.1.2] - 2026-11-02
 
+### Fixed (update restart)
+- The update helper now proves it is running before FlickFetch closes. If it cannot start, FlickFetch stays open and saves the verified update to `Downloads\FlickFetch Updates` (shown in its folder) instead of closing with nothing reopening.
+- The helper confirms the new version stays open for a few seconds before it deletes the old exe.
+- If the exe cannot be replaced in place, the old exe is restored, the new version is started from `Downloads\FlickFetch Updates`, and the next launch shows a message saying where it is. As a last resort the old version is reopened and the new file is shown.
+- Helper progress is logged to `%LOCALAPPDATA%\FlickFetch\updates\apply-update.log`.
+
 ### Changed
 - Downloads are saved as "Title.mp3" now, without the video id in brackets.
 - Much smaller app: the exe is about 90-100 MB instead of 360 MB.

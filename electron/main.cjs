@@ -509,6 +509,21 @@ app.whenReady().then(async () => {
   // An icon pinned earlier carries no app ID, so Windows keeps it apart from the running window; link them (takes effect on next launch).
   if (process.platform === 'win32' && app.isPackaged) repairPinnedShortcuts({ shell, log: (level, message) => emit('app:log', { level, message }) });
   watchClipboard();
+  // The update helper leaves a note when it could not replace the exe in place. Say so plainly and show where the new version is.
+  setTimeout(() => {
+    const outcome = monitor.consumeUpdateResult?.();
+    if (!outcome) return;
+    emit('app:log', { level: outcome.status === 'ok' ? 'info' : 'warn', message: outcome.message });
+    if (outcome.status === 'ok') return;
+    const hasFile = Boolean(outcome.newPath) && fs.existsSync(outcome.newPath);
+    dialog.showMessageBox(mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined, {
+      type: outcome.status === 'fallback' ? 'info' : 'warning',
+      title: 'FlickFetch update',
+      message: outcome.status === 'fallback' ? `FlickFetch ${outcome.version} is running from a saved copy` : `FlickFetch ${outcome.version} could not be installed`,
+      detail: `${outcome.message}${hasFile ? `\n\nNew version: ${outcome.newPath}` : ''}`,
+      buttons: hasFile ? ['Show in folder', 'OK'] : ['OK'], defaultId: 0, cancelId: hasFile ? 1 : 0, noLink: true
+    }).then(({ response }) => { if (hasFile && response === 0) shell.showItemInFolder(outcome.newPath); }).catch(() => {});
+  }, 2500);
   if (app.isPackaged && process.platform === 'win32') {
     setTimeout(() => monitor.checkForUpdates().catch(error => emit('app:log', { level: 'warn', message: `FlickFetch update check failed: ${error.message}` })), 1800);
   }

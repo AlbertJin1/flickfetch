@@ -24,34 +24,65 @@ const USAGE_QUEUE_LIMIT = 100;
 const EXE_ENTRY_NAME = 'FlickFetch.exe';
 const UPDATE_FILE_PATTERN = /^FlickFetch-(\d+(?:\.\d+)+)-x64-Portable(?: \(\d+\))?\.exe(\.part)?$/i;
 
-// Runs detached after the app quits: waits for the running exe (found by path, so a renamed exe works), swaps the new
-// build into the SAME path (keeping whatever name the person gave it), starts it, then deletes the old exe and staging files.
+// Runs detached after the app quits. It waits for the running exe (found by path, so a renamed exe works), swaps the new
+// build into the SAME path (keeping whatever name the person gave it), starts it, confirms it stayed open, then deletes the
+// old exe and staging files. It never leaves the person stranded: if the in-place swap fails, the old exe is restored, the
+// verified new build is saved to a visible folder and started from there, and the next launch explains what happened.
+// ASCII only: Windows PowerShell 5.1 reads a BOM-less script file as ANSI.
 const APPLY_UPDATE_SCRIPT = String.raw`
-param([Parameter(Mandatory=$true)][string]$TargetPath,[Parameter(Mandatory=$true)][string]$SourcePath,[Parameter(Mandatory=$true)][int]$ParentPid,[Parameter(Mandatory=$true)][string]$ExpectedSha256)
+param([Parameter(Mandatory=$true)][string]$TargetPath,[Parameter(Mandatory=$true)][string]$SourcePath,[Parameter(Mandatory=$true)][int]$ParentPid,[Parameter(Mandatory=$true)][string]$ExpectedSha256,[Parameter(Mandatory=$true)][string]$Version,[Parameter(Mandatory=$true)][string]$LogPath,[Parameter(Mandatory=$true)][string]$ResultPath,[Parameter(Mandatory=$true)][string]$FallbackDir)
 $ErrorActionPreference = 'Stop'
 $source = [IO.Path]::GetFullPath($SourcePath)
 $target = [IO.Path]::GetFullPath($TargetPath)
+$directory = [IO.Path]::GetDirectoryName($target)
+$backup = $target + '.ff-backup'
+$expected = $ExpectedSha256.ToLowerInvariant()
+$staged = ''
+$movedOriginal = $false
+$succeeded = $false
+
+function Write-Log([string]$Message) {
+  try { ('[' + (Get-Date -Format o) + '] ' + $Message) | Out-File -LiteralPath $LogPath -Append -Encoding utf8 } catch {}
+}
+function Write-Result([string]$Status, [string]$Message, [string]$NewPath) {
+  try {
+    $json = ([ordered]@{ status = $Status; version = $Version; message = $Message; newPath = $NewPath; oldPath = $target; at = (Get-Date -Format o) } | ConvertTo-Json)
+    [IO.File]::WriteAllText($ResultPath, $json, (New-Object Text.UTF8Encoding($false)))
+  } catch {}
+}
+function Get-TargetProcesses {
+  # Match by full path, not by the name 'FlickFetch': the person may have renamed the exe.
+  @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    try { $_.Path -and [IO.Path]::GetFullPath($_.Path).Equals($target, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
+  })
+}
+function Start-AndConfirm([string]$Path) {
+  $process = Start-Process -FilePath $Path -WorkingDirectory ([IO.Path]::GetDirectoryName($Path)) -PassThru
+  Start-Sleep -Seconds 4
+  $alive = $false
+  try { $alive = -not $process.HasExited } catch { $alive = $false }
+  if (-not $alive) { throw 'FlickFetch closed right after it was started.' }
+}
+
+# This line is the handshake: FlickFetch only quits once it can see that the helper is really running.
+Write-Log 'helper started'
 try {
   try { Wait-Process -Id $ParentPid -Timeout 90 -ErrorAction SilentlyContinue } catch {}
   # The electron-builder portable bootstrapper may still own the EXE briefly after its child exits.
   $deadline = (Get-Date).AddSeconds(45)
   do {
-    # Match by full path, not by the name 'FlickFetch': the person may have renamed the exe.
-    $running = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-      try { $_.Path -and [IO.Path]::GetFullPath($_.Path).Equals($target, [StringComparison]::OrdinalIgnoreCase) } catch { $false }
-    })
+    $running = @(Get-TargetProcesses)
     if ($running.Count -eq 0) { break }
     Start-Sleep -Milliseconds 500
   } while ((Get-Date) -lt $deadline)
-  if ($running.Count -gt 0) { throw 'FlickFetch is still running; the update was not applied.' }
-  $directory = [IO.Path]::GetDirectoryName($target)
+  if ($running.Count -gt 0) { throw 'FlickFetch is still running, so the exe could not be replaced.' }
+  Write-Log 'old exe is closed'
+
   $staged = Join-Path $directory ('.FlickFetch.update-' + [Guid]::NewGuid().ToString('N') + '.exe')
-  $backup = $target + '.ff-backup'
   Copy-Item -LiteralPath $source -Destination $staged -Force
   $actual = (Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash.ToLowerInvariant()
-  if ($actual -ne $ExpectedSha256.ToLowerInvariant()) { throw 'Staged executable checksum mismatch.' }
+  if ($actual -ne $expected) { throw 'Staged executable checksum mismatch.' }
   if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $backup -Force }
-  $movedOriginal = $false
   if (Test-Path -LiteralPath $target) {
     $moved = $false
     for ($attempt = 1; $attempt -le 20 -and -not $moved; $attempt++) {
@@ -59,31 +90,63 @@ try {
       catch { if ($attempt -eq 20) { throw }; Start-Sleep -Milliseconds 750 }
     }
   }
-  try {
-    Move-Item -LiteralPath $staged -Destination $target -Force
-    $installed = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($installed -ne $ExpectedSha256.ToLowerInvariant()) { throw 'Installed executable checksum mismatch.' }
-    Start-Process -FilePath $target -WorkingDirectory $directory
-  } catch {
-    if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue }
-    if ($movedOriginal -and (Test-Path -LiteralPath $backup)) { Move-Item -LiteralPath $backup -Destination $target -Force }
-    throw
-  }
-  # The update succeeded: remove the old exe (backup). Antivirus / the bootstrapper can hold it briefly, so retry.
-  for ($attempt = 1; $attempt -le 30 -and (Test-Path -LiteralPath $backup); $attempt++) {
-    try { Remove-Item -LiteralPath $backup -Force -ErrorAction Stop } catch { Start-Sleep -Milliseconds 1000 }
-  }
-  Remove-Item -LiteralPath $source -Force -ErrorAction SilentlyContinue
-  Get-ChildItem -LiteralPath ([IO.Path]::GetDirectoryName($source)) -Filter 'FlickFetch-*.exe' -Force -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $target } | Remove-Item -Force -ErrorAction SilentlyContinue
-  if ($PSCommandPath) { Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue }
-  Get-ChildItem -LiteralPath $directory -Filter '.FlickFetch.update-*.exe' -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+  Move-Item -LiteralPath $staged -Destination $target -Force
+  $installed = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($installed -ne $expected) { throw 'Installed executable checksum mismatch.' }
+  Write-Log 'new exe is in place, starting it'
+  Start-AndConfirm $target
+  Write-Log 'updated and relaunched'
+  $succeeded = $true
+  Write-Result 'ok' ('FlickFetch was updated to ' + $Version + '.') $target
 } catch {
-  $log = Join-Path $env:TEMP 'FlickFetch-update-error.log'
-  ('[' + (Get-Date -Format o) + '] ' + $_.Exception.Message) | Out-File -LiteralPath $log -Append -Encoding utf8
-  if (Test-Path -LiteralPath $staged) { Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue }
-  if (Test-Path -LiteralPath $source) { Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"' + $source + '"') }
-  exit 1
+  $reason = $_.Exception.Message
+  Write-Log ('In-place update failed: ' + $reason)
+  # 1) Put the old exe back exactly where it was (and drop anything half-installed).
+  try {
+    if ($movedOriginal) {
+      if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue }
+      if (Test-Path -LiteralPath $backup) { Move-Item -LiteralPath $backup -Destination $target -Force }
+    }
+  } catch { Write-Log ('Could not restore the old exe: ' + $_.Exception.Message) }
+  if ($staged -and (Test-Path -LiteralPath $staged)) { Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue }
+  # 2) Fallback: keep the verified new build in a folder the person can see and start it from there.
+  $fallback = Join-Path $FallbackDir ('FlickFetch-' + $Version + '-x64-Portable.exe')
+  $fallbackWorked = $false
+  try {
+    New-Item -ItemType Directory -Force -Path $FallbackDir | Out-Null
+    Copy-Item -LiteralPath $source -Destination $fallback -Force
+    if ((Get-FileHash -LiteralPath $fallback -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) { throw 'The saved copy failed its checksum.' }
+    Start-AndConfirm $fallback
+    $fallbackWorked = $true
+    Write-Log ('Started the new version from ' + $fallback)
+    Write-Result 'fallback' ('FlickFetch could not replace its own exe (' + $reason + '). Version ' + $Version + ' was started from a saved copy instead. Your original exe is unchanged.') $fallback
+    Remove-Item -LiteralPath $source -Force -ErrorAction SilentlyContinue
+  } catch { Write-Log ('Fallback failed: ' + $_.Exception.Message) }
+  if (-not $fallbackWorked) {
+    # 3) Last resort: reopen the version the person had, and show them where the verified new file is.
+    $shown = $source
+    if (Test-Path -LiteralPath $fallback) { $shown = $fallback }
+    else {
+      # The staging folder is tidied on launch, so give the only copy a name that survives that.
+      try { $kept = Join-Path ([IO.Path]::GetDirectoryName($source)) ('keep-FlickFetch-' + $Version + '-x64-Portable.exe'); Move-Item -LiteralPath $source -Destination $kept -Force; $shown = $kept } catch {}
+    }
+    Write-Result 'failed' ('The update to ' + $Version + ' could not be applied (' + $reason + '). The downloaded file was kept so you can run it yourself.') $shown
+    try { if (Test-Path -LiteralPath $target) { Start-Process -FilePath $target -WorkingDirectory $directory } } catch { Write-Log ('Could not reopen the old exe: ' + $_.Exception.Message) }
+  }
 }
+
+if ($succeeded) {
+  try {
+    # The update succeeded: remove the old exe (backup). Antivirus / the bootstrapper can hold it briefly, so retry.
+    for ($attempt = 1; $attempt -le 30 -and (Test-Path -LiteralPath $backup); $attempt++) {
+      try { Remove-Item -LiteralPath $backup -Force -ErrorAction Stop } catch { Start-Sleep -Milliseconds 1000 }
+    }
+    Remove-Item -LiteralPath $source -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath ([IO.Path]::GetDirectoryName($source)) -Filter 'FlickFetch-*.exe' -Force -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $target } | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath $directory -Filter '.FlickFetch.update-*.exe' -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+  } catch { Write-Log ('Cleanup warning: ' + $_.Exception.Message) }
+}
+if ($PSCommandPath) { Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue }
 `;
 
 function randomId() { return crypto.randomBytes(16).toString('hex'); }
@@ -308,6 +371,7 @@ class MonitorService {
     this.usageLogFile = path.join(userDataPath, 'monitor-usage.log');
     this.reviewStateFile = path.join(userDataPath, 'review-state.json');
     this.reviewOutboxFile = path.join(userDataPath, 'review-outbox.enc');
+    this.updateResultFile = path.join(userDataPath, 'update-result.json');
     this.reviewState = null;
     this.reviewStateLoad = null;
     this.reviewAccounting = null;
@@ -369,7 +433,9 @@ class MonitorService {
         if (fs.existsSync(stageDir)) {
           for (const name of fs.readdirSync(stageDir)) {
             const file = path.join(stageDir, name);
-            try { if (Date.now() - fs.statSync(file).mtimeMs > 10 * 60_000) fs.rmSync(file, { recursive: true, force: true }); } catch { /* ignore */ }
+            // keep-* is the only copy of a release that could not be applied; it lingers for a week so the person can still run it.
+            const maxAge = /^keep-/i.test(name) ? 7 * 24 * 3_600_000 : 10 * 60_000;
+            try { if (Date.now() - fs.statSync(file).mtimeMs > maxAge) fs.rmSync(file, { recursive: true, force: true }); } catch { /* ignore */ }
           }
         }
       }
@@ -1009,16 +1075,49 @@ class MonitorService {
     fs.writeFileSync(stagedExe, executable, { mode: 0o700 });
     this.emit('updater:progress', { phase: 'prepare', percent: 90 });
     const helperPath = path.join(stageDir, 'apply-update.ps1');
-    const helper = APPLY_UPDATE_SCRIPT;
-    fs.writeFileSync(helperPath, helper, 'utf8');
+    const logPath = path.join(stageDir, 'apply-update.log');
+    fs.writeFileSync(helperPath, APPLY_UPDATE_SCRIPT, 'utf8');
+    fs.rmSync(logPath, { force: true });
+    fs.rmSync(this.updateResultFile, { force: true });
     const checksum = sha256(executable);
     const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', helperPath,
-      '-TargetPath', target, '-SourcePath', stagedExe, '-ParentPid', String(process.pid), '-ExpectedSha256', checksum];
+      '-TargetPath', target, '-SourcePath', stagedExe, '-ParentPid', String(process.pid), '-ExpectedSha256', checksum,
+      '-Version', String(update.latestVersion), '-LogPath', logPath, '-ResultPath', this.updateResultFile, '-FallbackDir', this.updateDownloadDir()];
+    let spawnError = null;
     const child = spawn('powershell.exe', args, { detached: true, stdio: 'ignore', windowsHide: true });
-    child.on('error', error => this.log('error', `Could not start the update installer: ${error.message}`));
+    child.on('error', error => { spawnError = error; this.log('error', `Could not start the update installer: ${error.message}`); });
     child.unref();
+    // Only quit once the helper has proven it is running. Otherwise the app would close and nothing would ever reopen it.
+    if (!(await this.waitForUpdateHelper(logPath, () => spawnError))) {
+      try { child.kill(); } catch { /* already gone */ }
+      this.log('warn', `The update helper did not start${spawnError ? ` (${spawnError.message})` : ''}; the verified release is being saved instead.`);
+      for (const file of [helperPath, stagedExe]) { try { fs.rmSync(file, { force: true }); } catch { /* tidied on next launch */ } }
+      return this.saveVerifiedRelease(update, executable, method, transfer);
+    }
     this.emit('updater:progress', { phase: 'restarting', percent: 100 });
     return { success: true, restarting: true, version: update.latestVersion, method, usedDifferential: method === 'delta', transfer };
+  }
+
+  /** Resolves true once the detached helper has written its first log line; false if it never starts. */
+  async waitForUpdateHelper(logPath, getSpawnError, timeoutMs = 15_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (getSpawnError()) return false;
+      try { if (fs.readFileSync(logPath, 'utf8').includes('helper started')) return true; } catch { /* not written yet */ }
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+    return false;
+  }
+
+  /** Reads and deletes the note the update helper left for the next launch. Returns null when there is none. */
+  consumeUpdateResult() {
+    try {
+      const raw = fs.readFileSync(this.updateResultFile, 'utf8').replace(/^\uFEFF/, '');
+      fs.rmSync(this.updateResultFile, { force: true });
+      const value = JSON.parse(raw);
+      if (!value || !['ok', 'fallback', 'failed'].includes(value.status)) return null;
+      return { status: value.status, version: safeText(value.version, 40), message: safeText(value.message, 600), newPath: safeText(value.newPath, 520), oldPath: safeText(value.oldPath, 520) };
+    } catch { return null; }
   }
 
   /** Differential reuse -> compressed package -> raw EXE, then size and SHA-256 verification. Returns the verified bytes. */
@@ -1090,7 +1189,16 @@ class MonitorService {
       } catch { /* unreadable: download a fresh copy below */ }
     }
     const { executable, method, transfer } = await this.fetchVerifiedExecutable(update, { basePaths: this.differentialBasePaths('download') });
-    let destination = preferred;
+    return this.saveVerifiedRelease(update, executable, method, transfer);
+  }
+
+  /** Writes the verified portable release to the Downloads folder (never overwriting a different file) and reports where it is. */
+  saveVerifiedRelease(update, executable, method, transfer) {
+    const dir = this.updateDownloadDir();
+    fs.mkdirSync(dir, { recursive: true });
+    const base = `FlickFetch-${update.latestVersion}-x64-Portable`;
+    const expected = String(update.sha256).toLowerCase();
+    let destination = path.join(dir, `${base}.exe`);
     for (let n = 1; fs.existsSync(destination) && n < 100; n += 1) destination = path.join(dir, `${base} (${n}).exe`);
     const partial = `${destination}.part`;
     try {

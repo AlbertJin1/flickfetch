@@ -562,3 +562,63 @@ test('installed builds use their program files and earlier saved releases as the
     assert.deepEqual(service.differentialBasePaths('install'), [path.resolve(service.targetExecutable)]);
   } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
+
+test('the update helper proves it started, restores the old exe on failure and falls back to a visible copy', () => {
+  assert.match(APPLY_UPDATE_SCRIPT, /Write-Log 'helper started'/);
+  // Failure path: put the old exe back, then start the verified new build from the visible fallback folder.
+  assert.match(APPLY_UPDATE_SCRIPT, /Move-Item -LiteralPath \$backup -Destination \$target/);
+  assert.match(APPLY_UPDATE_SCRIPT, /\$FallbackDir/);
+  assert.match(APPLY_UPDATE_SCRIPT, /Write-Result 'fallback'/);
+  assert.match(APPLY_UPDATE_SCRIPT, /Write-Result 'failed'/);
+  // The old exe is only deleted after the new one was started and stayed open.
+  assert.ok(APPLY_UPDATE_SCRIPT.indexOf('Start-AndConfirm $target') < APPLY_UPDATE_SCRIPT.indexOf('if ($succeeded)'));
+  // Windows PowerShell 5.1 reads a BOM-less script as ANSI, so it must stay ASCII.
+  assert.doesNotMatch(APPLY_UPDATE_SCRIPT, /[^\x00-\x7F]/);
+});
+
+test('waitForUpdateHelper only reports success once the helper wrote its first log line', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'flickfetch-helper-'));
+  try {
+    const service = new MonitorService({ app: {}, appVersion: '2.2.0', userDataPath: directory, packaged: true, platform: 'win32' });
+    const log = path.join(directory, 'apply-update.log');
+    assert.equal(await service.waitForUpdateHelper(log, () => null, 300), false);
+    assert.equal(await service.waitForUpdateHelper(log, () => new Error('spawn failed'), 300), false);
+    setTimeout(() => fs.writeFileSync(log, '[now] helper started\n'), 100);
+    assert.equal(await service.waitForUpdateHelper(log, () => null, 2000), true);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('consumeUpdateResult returns the helper note once, then nothing', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'flickfetch-result-'));
+  try {
+    const service = new MonitorService({ app: {}, appVersion: '2.2.0', userDataPath: directory, packaged: true, platform: 'win32' });
+    assert.equal(service.consumeUpdateResult(), null);
+    fs.writeFileSync(service.updateResultFile, JSON.stringify({ status: 'fallback', version: '2.3.0', message: 'moved', newPath: 'C:\\Downloads\\x.exe', oldPath: 'C:\\old.exe' }));
+    assert.deepEqual(service.consumeUpdateResult(), { status: 'fallback', version: '2.3.0', message: 'moved', newPath: 'C:\\Downloads\\x.exe', oldPath: 'C:\\old.exe' });
+    assert.equal(service.consumeUpdateResult(), null);
+    fs.writeFileSync(service.updateResultFile, '\uFEFF{"status":"bogus"}');
+    assert.equal(service.consumeUpdateResult(), null);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('cleanup keeps the only copy of an unapplied release for a week', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'flickfetch-keep-'));
+  const previous = process.env.PORTABLE_EXECUTABLE_FILE;
+  try {
+    process.env.PORTABLE_EXECUTABLE_FILE = path.join(directory, 'FlickFetch.exe');
+    fs.writeFileSync(process.env.PORTABLE_EXECUTABLE_FILE, 'x');
+    const service = new MonitorService({ app: { getPath: () => path.join(directory, 'Downloads') }, appVersion: '2.2.0', userDataPath: path.join(directory, 'data'), packaged: true, platform: 'win32' });
+    const stage = path.join(directory, 'data', 'updates');
+    fs.mkdirSync(stage, { recursive: true });
+    const hourAgo = new Date(Date.now() - 3_600_000);
+    const stale = path.join(stage, 'FlickFetch-2.3.0-abc.exe');
+    const kept = path.join(stage, 'keep-FlickFetch-2.3.0-x64-Portable.exe');
+    for (const file of [stale, kept]) { fs.writeFileSync(file, 'x'); fs.utimesSync(file, hourAgo, hourAgo); }
+    service.runUpdateCleanup();
+    assert.equal(fs.existsSync(stale), false);
+    assert.equal(fs.existsSync(kept), true);
+  } finally {
+    if (previous === undefined) delete process.env.PORTABLE_EXECUTABLE_FILE; else process.env.PORTABLE_EXECUTABLE_FILE = previous;
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
