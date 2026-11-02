@@ -1,5 +1,18 @@
 # FlickFetch Changelog
 
+## [2.1.9] - 2026-11-02
+
+### Test release
+- Identical to 2.1.8. Installing it from 2.1.8 should keep the same exe name and leave no `.old` or `.updating.exe` behind.
+
+## [2.1.8] - 2026-11-02
+
+### Fixed (updater now uses the same method as PDF Studio 3.0.8+)
+- Updates keep the **same exe file name**. A running portable exe cannot be renamed by Windows, so the verified new build is started under a temporary name (`<name>.updating.exe`) as a short helper. FlickFetch closes; the helper waits until the old exe is free, renames it to `<name>.exe.old`, puts the new build at the exact original name, reopens it and exits. The new FlickFetch then deletes `<name>.exe.old` and `<name>.updating.exe`.
+- No scripts are involved in this path. The cmd and PowerShell helpers and the saved copy in `Downloads\FlickFetch Updates` remain only as fallbacks if the helper exe cannot start.
+- If the swap fails, the previous exe is restored under its name and reopened, and the next launch explains what happened.
+- The direct in-place rename now gives up after about a second (it only works on some PCs) instead of retrying for 10 seconds, and names the backup `.old`.
+
 ## [2.1.7] - 2026-11-02
 
 ### Fixed

@@ -9,6 +9,7 @@ const zlib = require('node:zlib');
 const { spawn } = require('node:child_process');
 const { isMonitorApiUrl, monitorApiUrlCandidates } = require('./monitor-api.cjs');
 const reviewPolicy = require('./review-queue-policy.cjs');
+const updateSwap = require('./update-swap.cjs');
 
 const APP_ID = 'flickfetch';
 const APP_NAME = 'FlickFetch';
@@ -473,6 +474,8 @@ class MonitorService {
   // download folder in AppData. Runs shortly after launch (the update helper may still be finishing) and never throws.
   cleanupUpdateLeftovers() {
     if (!this.packaged || this.platform !== 'win32') return;
+    // The new build started by the update helper deletes "<exe>.old" and "<name>.updating.exe" as soon as the old process has exited.
+    if (this.isPortable) updateSwap.cleanupLeftovers({ target: path.resolve(this.targetExecutable) }).then(result => { for (const file of result.removed) this.log('info', `Removed update leftover: ${path.basename(file)}`); }).catch(() => {});
     for (const delay of [30_000, 180_000]) { const timer = setTimeout(() => this.runUpdateCleanup(), delay); timer.unref?.(); }
   }
 
@@ -486,7 +489,7 @@ class MonitorService {
         const dir = path.dirname(target);
         if (fs.existsSync(target)) {
           for (const name of fs.readdirSync(dir)) {
-            if (name === `${path.basename(target)}.ff-backup` || name === `${path.basename(target)}.old` || name === `${path.basename(target)}.new.part` || /^\.FlickFetch\.update-[0-9a-f]+\.exe$/i.test(name)) {
+            if (name === `${path.basename(target)}.ff-backup` || name === `${path.basename(target)}.old` || name === `${path.basename(target)}.new.part` || name.toLowerCase() === path.basename(updateSwap.helperPathFor(target)).toLowerCase() || /^\.FlickFetch\.update-[0-9a-f]+\.exe$/i.test(name)) {
               try { fs.rmSync(path.join(dir, name), { force: true }); } catch { /* retried on the next launch */ }
             }
           }
@@ -1151,16 +1154,27 @@ class MonitorService {
     }
     this.log('warn', `The exe could not be replaced while running (${swapped.reason}); using an update helper instead.`);
     const reasons = [`rename: ${swapped.reason}`];
-    const executable = fs.readFileSync(stagedPath);
-
     const stageDir = path.join(this.userDataPath, 'updates');
     fs.mkdirSync(stageDir, { recursive: true });
+    const logPath = path.join(stageDir, 'apply-update.log');
+    const done = { success: true, restarting: true, version: update.latestVersion, method, usedDifferential: method === 'delta', transfer };
+
+    // A running portable exe cannot be renamed, so the new build itself finishes the update once this one has closed:
+    // old exe -> <name>.old, new build -> the exact original name, reopened. No scripts involved.
+    this.emit('updater:progress', { phase: 'prepare', percent: 90 });
+    const exeHelper = await this.startExeHelper({ target, stagedPath, checksum, version: update.latestVersion, logPath });
+    if (exeHelper.ok) {
+      this.discardStagedUpdate(); // the helper works from its own copy
+      this.emit('updater:progress', { phase: 'restarting', percent: 100 });
+      return { ...done, replacedInPlace: true };
+    }
+    reasons.push(`exe helper: ${exeHelper.reason}`);
+    this.log('warn', `The update helper exe did not start (${exeHelper.reason}); trying the script helpers.`);
+    const executable = fs.readFileSync(stagedPath);
     const stagedExe = path.join(stageDir, `FlickFetch-${update.latestVersion}-${randomId().slice(0, 8)}.exe`);
     fs.writeFileSync(stagedExe, executable, { mode: 0o700 });
     this.emit('updater:progress', { phase: 'prepare', percent: 90 });
-    const logPath = path.join(stageDir, 'apply-update.log');
     fs.rmSync(this.updateResultFile, { force: true });
-    const done = { success: true, restarting: true, version: update.latestVersion, method, usedDifferential: method === 'delta', transfer };
     // Each helper must prove it is running (it writes to the log) before FlickFetch quits; otherwise try the next one.
     const attempts = [
       { name: 'cmd', file: process.env.ComSpec || 'cmd.exe', script: path.join(stageDir, 'apply-update.cmd'),
@@ -1335,17 +1349,17 @@ class MonitorService {
 
   /**
    * Swaps the staged exe into place while the old one is still running (Windows allows renaming, not deleting, a running exe):
-   * running exe -> <name>.ff-backup, staged exe -> the exact original path. A failure puts the old exe back untouched.
+   * running exe -> <name>.old, staged exe -> the exact original path. A failure puts the old exe back untouched.
    */
   async swapStagedExecutable(target, staged) {
-    const backup = `${target}.ff-backup`;
+    const backup = updateSwap.oldPathFor(target);
     let movedOriginal = false;
     const retry = async operation => {
       for (let attempt = 1; ; attempt += 1) {
         try { return operation(); }
         catch (error) {
-          if (attempt >= 20 || !['EPERM', 'EBUSY', 'EACCES'].includes(error?.code)) throw error;
-          await new Promise(resolve => setTimeout(resolve, 500));
+          if (attempt >= 4 || !['EPERM', 'EBUSY', 'EACCES'].includes(error?.code)) throw error;
+          await new Promise(resolve => setTimeout(resolve, 400));
         }
       }
     };
@@ -1358,6 +1372,34 @@ class MonitorService {
       try { if (movedOriginal) { fs.rmSync(target, { force: true }); fs.renameSync(backup, target); } } catch { /* the backup file is still beside it */ }
       return { ok: false, reason: `${error?.code ? `${error.code}: ` : ''}${String(error?.message || error)}` };
     }
+  }
+
+  /**
+   * Starts the new build under the temporary name "<name>.updating.exe" with the swap instructions in its environment, and waits
+   * for it to prove it is running (it writes "helper started" to the log). Returns { ok } or { ok: false, reason }.
+   */
+  async startExeHelper({ target, stagedPath, checksum, version, logPath }) {
+    let helperPath;
+    try {
+      fs.rmSync(logPath, { force: true });
+      fs.rmSync(this.updateResultFile, { force: true });
+      helperPath = await updateSwap.prepareHelper({ target, stagedPath, sha256: checksum });
+    } catch (error) { return { ok: false, reason: String(error?.message || error) }; }
+    let spawnError = null;
+    let child = null;
+    try {
+      const env = { ...process.env };
+      for (const key of Object.keys(env)) if (/^PORTABLE_EXECUTABLE_/i.test(key) || key === 'ELECTRON_RUN_AS_NODE') delete env[key];
+      Object.assign(env, { FLICKFETCH_FINISH_UPDATE_TARGET: target, FLICKFETCH_FINISH_UPDATE_SOURCE: helperPath, FLICKFETCH_FINISH_UPDATE_LOG: logPath, FLICKFETCH_FINISH_UPDATE_VERSION: String(version || '') });
+      child = spawn(helperPath, [], { detached: true, stdio: 'ignore', cwd: path.dirname(helperPath), env });
+      child.on('error', error => { spawnError = error; });
+      child.unref();
+    } catch (error) { spawnError = error; }
+    // The portable exe first unpacks itself, which can take a while on a slow disk or while antivirus scans it.
+    if (await this.waitForUpdateHelper(logPath, () => spawnError, 30_000)) return { ok: true };
+    try { child?.kill(); } catch { /* already gone */ }
+    try { fs.rmSync(helperPath, { force: true }); } catch { /* removed on the next launch */ }
+    return { ok: false, reason: spawnError ? spawnError.message : 'did not start' };
   }
 
   /** Called as the app exits after an in-place update: starts the new exe at the same path, fully detached from this process. */

@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { BookOpen, Check, CircleAlert, Copy, FolderSearch, HardDrive, ShieldCheck, Star, X } from 'lucide-react';
 
 const AUTHOR = { name: 'Jessie Albert Regualos', alias: 'Yotsuchi' };
-const FALLBACK_VERSION = '2.1.7';
+const FALLBACK_VERSION = '2.1.9';
 
 const PLATFORM_NAMES = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' };
 const ARCH_NAMES = { x64: '64-bit', arm64: 'ARM64', ia32: '32-bit' };

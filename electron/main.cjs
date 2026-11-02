@@ -13,6 +13,35 @@ const { parseLegacySettings } = require('./services/legacy-settings.cjs');
 const { loadWindowState, trackWindowState } = require('./services/window-state.cjs');
 const { MonitorService } = require('./services/monitor-service.cjs');
 const { APP_ID, applyWindowIdentity, repairPinnedShortcuts } = require('./services/taskbar-identity.cjs');
+const updateSwap = require('./services/update-swap.cjs');
+
+// Update helper mode: the verified new build was started under a temporary name only to swap files once the old FlickFetch has
+// closed (see services/update-swap.cjs). It opens no window and reports nothing.
+const FINISH_UPDATE_TARGET = process.env.FLICKFETCH_FINISH_UPDATE_TARGET || '';
+async function runUpdateHelperMode() {
+  const logFile = process.env.FLICKFETCH_FINISH_UPDATE_LOG || '';
+  const version = process.env.FLICKFETCH_FINISH_UPDATE_VERSION || '';
+  const log = message => { try { if (logFile) fs.appendFileSync(logFile, `${message}\n`, 'utf8'); } catch { /* the handshake simply times out */ } };
+  let code = 0;
+  try {
+    log('helper started');
+    const result = await updateSwap.runHelperSwap({
+      target: FINISH_UPDATE_TARGET, source: process.env.FLICKFETCH_FINISH_UPDATE_SOURCE || '', log,
+      launch: exe => new Promise((resolve, reject) => {
+        const env = { ...process.env };
+        for (const key of Object.keys(env)) if (/^PORTABLE_EXECUTABLE_/i.test(key) || /^FLICKFETCH_FINISH_UPDATE_/i.test(key) || key === 'ELECTRON_RUN_AS_NODE') delete env[key];
+        const child = spawn(exe, [], { detached: true, stdio: 'ignore', cwd: path.dirname(exe), env });
+        child.once('error', reject);
+        child.once('spawn', () => { child.unref(); resolve(); });
+      })
+    });
+    if (!result.ok) {
+      code = 1;
+      try { fs.writeFileSync(path.join(app.getPath('userData'), 'update-result.json'), JSON.stringify({ status: 'failed', version, message: `The update could not be finished (${result.reason}). Your previous version was reopened; check for updates to try again.` })); } catch { /* ignore */ }
+    }
+  } catch (error) { code = 1; log(`helper crashed: ${error?.message || error}`); }
+  app.exit(code);
+}
 
 // Data location: ALWAYS %LOCALAPPDATA%\FlickFetch (settings, history, monitor state, helper tools, staged updates).
 // Nothing is written next to the exe. A "FlickFetch-Data" folder left beside the exe by v2.1.0 is migrated once.
@@ -507,6 +536,7 @@ function registerIpc() {
 if (process.platform === 'win32') app.setAppUserModelId(APP_ID);
 
 app.whenReady().then(async () => {
+  if (FINISH_UPDATE_TARGET) return runUpdateHelperMode();
   settingsFile = path.join(app.getPath('userData'), 'settings.json');
   loadSettings();
   tools = new ToolManager(app.getPath('userData'), emit);

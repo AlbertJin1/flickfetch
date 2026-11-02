@@ -60,7 +60,7 @@ function App() {
   const [dragActive, setDragActive] = useState(false);
   const [spotifyRequest, setSpotifyRequest] = useState({ url: '', sequence: 0 });
   const [aboutOpen, setAboutOpen] = useState(false);
-  const [appInfo, setAppInfo] = useState({ version: '2.1.7' });
+  const [appInfo, setAppInfo] = useState({ version: '2.1.9' });
   const [isReady, setIsReady] = useState(false);
   const [sidebarCompact, setSidebarCompact] = useState(() => {
     try { return localStorage.getItem('flickfetch-sidebar-compact') === 'true'; }
@@ -429,9 +429,9 @@ function App() {
               <button onClick={updateYtDlpNow} disabled={updatingYtDlp}>{updatingYtDlp ? 'Updating…' : 'Update now'} <ArrowUpRight size={14} /></button>
             </div>
           )}
-          <div className="sidebar-user" title={`FlickFetch desktop · v${appInfo.version || '2.1.7'}`}>
+          <div className="sidebar-user" title={`FlickFetch desktop · v${appInfo.version || '2.1.9'}`}>
             <div className="sidebar-avatar">FF</div>
-            <div className="sidebar-user-copy"><strong>FlickFetch desktop</strong><span>Version {appInfo.version || '2.1.7'}</span></div>
+            <div className="sidebar-user-copy"><strong>FlickFetch desktop</strong><span>Version {appInfo.version || '2.1.9'}</span></div>
             <ShieldCheck size={15} className="sidebar-security" />
           </div>
           </div>
@@ -449,7 +449,7 @@ function App() {
 
         <PreviewBar />
 
-        <footer className="app-statusbar"><div className="statusbar-left"><span className="statusbar-live"><i />{activeCount ? `${activeCount} task${activeCount === 1 ? '' : 's'} running` : 'All caught up'}</span><span className="status-separator" />{completedCount} completed <span className="status-separator" />{toolStatus?.complete ? 'All helper tools installed' : 'Helper tools may need setup'}</div><div className="statusbar-right"><span className="status-version">v{appInfo.version || '2.1.7'}</span></div></footer>
+        <footer className="app-statusbar"><div className="statusbar-left"><span className="statusbar-live"><i />{activeCount ? `${activeCount} task${activeCount === 1 ? '' : 's'} running` : 'All caught up'}</span><span className="status-separator" />{completedCount} completed <span className="status-separator" />{toolStatus?.complete ? 'All helper tools installed' : 'Helper tools may need setup'}</div><div className="statusbar-right"><span className="status-version">v{appInfo.version || '2.1.9'}</span></div></footer>
       </main>
       </div>
 

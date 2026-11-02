@@ -644,14 +644,14 @@ test('a portable update replaces the running exe in place, keeps its name, and r
       assert.equal(result.restarting, true);
       assert.equal(result.replacedInPlace, true);
     });
-    // The new build now lives at the exact old path; the old exe waits beside it as .ff-backup; nothing else is left over.
+    // The new build now lives at the exact old path; the old exe waits beside it as .old; nothing else is left over.
     assert.equal(sha256(fs.readFileSync(exePath)), hash);
-    assert.equal(fs.readFileSync(`${exePath}.ff-backup`, 'utf8'), 'old-version');
+    assert.equal(fs.readFileSync(`${exePath}.old`, 'utf8'), 'old-version');
     assert.deepEqual(fs.readdirSync(directory).filter(name => name.startsWith('.FlickFetch.update-')), []);
     assert.equal(service.pendingRelaunch, exePath);
     // The next launch deletes the backup and never touches the new exe.
     service.runUpdateCleanup();
-    assert.equal(fs.existsSync(`${exePath}.ff-backup`), false);
+    assert.equal(fs.existsSync(`${exePath}.old`), false);
     assert.equal(sha256(fs.readFileSync(exePath)), hash);
   } finally {
     if (previous === undefined) delete process.env.PORTABLE_EXECUTABLE_FILE; else process.env.PORTABLE_EXECUTABLE_FILE = previous;
@@ -724,7 +724,7 @@ test('staged update: downloaded early beside the exe, re-verified on the next la
       assert.equal(result.replacedInPlace, true);
       assert.equal(downloads, before);
       assert.equal(sha256(fs.readFileSync(exePath)), hash);
-      assert.equal(fs.readFileSync(`${exePath}.ff-backup`, 'utf8'), 'old-version');
+      assert.equal(fs.readFileSync(`${exePath}.old`, 'utf8'), 'old-version');
       assert.equal(fs.existsSync(`${exePath}.new`), false);
       assert.equal(fs.existsSync(path.join(directory, 'data', 'pending-update.json')), false);
       assert.equal(second.pendingRelaunch, exePath);
