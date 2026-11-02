@@ -56,7 +56,7 @@ function buildDownloadArgs(settings, binDir, resolved = null) {
   args.push('--print', 'before_dl:@@T|%(playlist_index)s|%(n_entries)s|%(title)s');
   args.push('--print', 'after_move:@@F|%(filepath)s');
 
-  const template = s.template?.trim() || '%(title).150B [%(id)s].%(ext)s';
+  const template = s.template?.trim() || '%(title).150B.%(ext)s';
   const outputTemplate = s.playlist ? '%(playlist_title&{}/|)s%(playlist_index&{} - |)s' + template : template;
   args.push('-P', s.outputDir, '-o', outputTemplate, s.playlist ? '--yes-playlist' : '--no-playlist');
 

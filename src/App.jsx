@@ -14,13 +14,13 @@ import GuideDialog from './components/GuideDialog.jsx';
 import UpdateDialog from './components/UpdateDialog.jsx';
 import AboutDialog from './components/AboutDialog.jsx';
 import ReviewDialog from './components/ReviewDialog.jsx';
-import { describeTransfer } from './lib/format.js';
+import { describeTransfer, summarizeNotes } from './lib/format.js';
 import { Notice, Toast } from './components/Primitives.jsx';
 
 const emptySettings = {
   outputDir: '', preset: 0, customFormat: '', container: 'mp4', preferCompat: false, audioFormat: 'mp3', audioQuality: '0', playlist: false,
   subs: false, autoSubs: false, embedSubs: true, subLangs: 'en.*', embedThumb: true, embedMeta: true, sponsor: false,
-  template: '%(title).150B [%(id)s].%(ext)s', restrict: false, overwrite: false, infoJson: false, description: false, writeThumb: false, useArchive: false,
+  template: '%(title).150B.%(ext)s', restrict: false, overwrite: false, infoJson: false, description: false, writeThumb: false, useArchive: false,
   sectionStart: '', sectionEnd: '', cookiesBrowser: '', cookiesFile: '', proxy: '', rateLimit: '', fragments: 4, retries: 10, parallel: 2,
   extraArgs: '', autoStart: true, inspectPages: true, watchClipboard: false, autoUpdate: true
 };
@@ -56,13 +56,23 @@ function App() {
   const [dragActive, setDragActive] = useState(false);
   const [spotifyRequest, setSpotifyRequest] = useState({ url: '', sequence: 0 });
   const [aboutOpen, setAboutOpen] = useState(false);
-  const [appInfo, setAppInfo] = useState({ version: '2.1.1' });
+  const [appInfo, setAppInfo] = useState({ version: '2.1.2' });
   const [isReady, setIsReady] = useState(false);
   const [sidebarCompact, setSidebarCompact] = useState(() => {
     try { return localStorage.getItem('flickfetch-sidebar-compact') === 'true'; }
     catch { return false; }
   });
   const [windowMaximized, setWindowMaximized] = useState(false);
+  // The sidebar update card can be dismissed. It is remembered per version, so a newer release shows the card again.
+  const [dismissedUpdate, setDismissedUpdate] = useState(() => {
+    try { return localStorage.getItem('flickfetch-update-dismissed') || ''; }
+    catch { return ''; }
+  });
+  const dismissUpdateCard = useCallback(version => {
+    setDismissedUpdate(String(version || ''));
+    try { localStorage.setItem('flickfetch-update-dismissed', String(version || '')); }
+    catch { /* Storage may be disabled in a restricted preview. */ }
+  }, []);
 
   useEffect(() => {
     try { localStorage.setItem('flickfetch-sidebar-compact', String(sidebarCompact)); }
@@ -373,11 +383,20 @@ function App() {
           </div>
 
           <div className="sidebar-footer">
-          {updaterInfo?.updateAvailable && (
+          {updaterInfo?.updateAvailable && (updatingApp || updateSaved || dismissedUpdate !== String(updaterInfo.latestVersion)) && (
             <div className="engine-card engine-ready engine-update app-release-card">
-              <div className="engine-card-top"><span className="engine-pulse" /><span>FLICKFETCH UPDATE</span><Download size={14} /></div>
+              <div className="engine-card-top"><span className="engine-pulse" /><span>FLICKFETCH UPDATE</span>{updatingApp ? <Download size={14} /> : <button type="button" className="app-release-dismiss" onClick={() => dismissUpdateCard(updaterInfo.latestVersion)} title="Dismiss" aria-label="Dismiss update notice"><X size={14} /></button>}</div>
               <strong>Version {updaterInfo.latestVersion}</strong>
-              <p>{updaterInfo.notes || (downloadMode ? 'A newer release is ready. FlickFetch downloads and verifies it, then you open the new file.' : 'A newer FlickFetch release is ready to install.')}</p>
+              {(() => {
+                const preview = summarizeNotes(updaterInfo.notes);
+                if (!preview.lines.length) return <p>{(updaterInfo.notes || '').trim().slice(0, 140) || (downloadMode ? 'A newer release is ready. FlickFetch downloads and verifies it, then you open the new file.' : 'A newer FlickFetch release is ready to install.')}</p>;
+                return (
+                  <>
+                    <ul className="app-release-notes">{preview.lines.map((line, index) => <li key={index}>{line}</li>)}</ul>
+                    <button type="button" className="app-release-more" onClick={openUpdateDialog}>{preview.more ? `See all changes (+${preview.more} more)` : 'See what\u2019s new'}</button>
+                  </>
+                );
+              })()}
               {updatingApp && <div className="app-update-progress" role="status" aria-live="polite"><div><span>{UPDATE_PHASES[updaterProgress?.phase] || 'Preparing'}</span><b>{Math.max(0, Math.min(100, Number(updaterProgress?.percent || 0)))}%</b></div><progress max="100" value={Math.max(0, Math.min(100, Number(updaterProgress?.percent || 0)))} /></div>}
               {updateSaved && !updatingApp
                 ? <><p>Saved and verified. Close FlickFetch, then open the new file to switch.</p><button onClick={showDownloadedUpdate}>Show in folder <ArrowUpRight size={14} /></button></>
@@ -403,9 +422,9 @@ function App() {
               <button onClick={updateYtDlpNow} disabled={updatingYtDlp}>{updatingYtDlp ? 'Updating…' : 'Update now'} <ArrowUpRight size={14} /></button>
             </div>
           )}
-          <div className="sidebar-user" title={`FlickFetch desktop · v${appInfo.version || '2.1.1'}`}>
+          <div className="sidebar-user" title={`FlickFetch desktop · v${appInfo.version || '2.1.2'}`}>
             <div className="sidebar-avatar">FF</div>
-            <div className="sidebar-user-copy"><strong>FlickFetch desktop</strong><span>Version {appInfo.version || '2.1.1'}</span></div>
+            <div className="sidebar-user-copy"><strong>FlickFetch desktop</strong><span>Version {appInfo.version || '2.1.2'}</span></div>
             <ShieldCheck size={15} className="sidebar-security" />
           </div>
           </div>
@@ -423,7 +442,7 @@ function App() {
 
         <PreviewBar />
 
-        <footer className="app-statusbar"><div className="statusbar-left"><span className="statusbar-live"><i />{activeCount ? `${activeCount} task${activeCount === 1 ? '' : 's'} running` : 'All caught up'}</span><span className="status-separator" />{completedCount} completed <span className="status-separator" />{toolStatus?.complete ? 'All helper tools installed' : 'Helper tools may need setup'}</div><div className="statusbar-right"><span className="status-version">v{appInfo.version || '2.1.1'}</span></div></footer>
+        <footer className="app-statusbar"><div className="statusbar-left"><span className="statusbar-live"><i />{activeCount ? `${activeCount} task${activeCount === 1 ? '' : 's'} running` : 'All caught up'}</span><span className="status-separator" />{completedCount} completed <span className="status-separator" />{toolStatus?.complete ? 'All helper tools installed' : 'Helper tools may need setup'}</div><div className="statusbar-right"><span className="status-version">v{appInfo.version || '2.1.2'}</span></div></footer>
       </main>
       </div>
 

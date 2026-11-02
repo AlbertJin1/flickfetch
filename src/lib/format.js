@@ -54,3 +54,21 @@ export function describeTransfer(transfer) {
   if (transfer.method === 'compressed') return `Downloaded ${got} (compressed full update)`;
   return `Downloaded ${got} (full update)`;
 }
+
+/**
+ * Short preview of the release notes for the small sidebar card: the first few bullet points (section headings dropped),
+ * each trimmed to one short line. The full notes stay in the Check for updates dialog.
+ */
+export function summarizeNotes(notes, { max = 3, width = 70 } = {}) {
+  const bullets = String(notes || '').replace(/\r\n?/g, '\n').split('\n')
+    .map(line => line.trim())
+    .filter(line => /^[-*\u2022]\s+/.test(line))
+    .map(line => line.replace(/^[-*\u2022]\s+/, '').replace(/\s+/g, ' '));
+  const lines = bullets.slice(0, max).map(text => {
+    if (text.length <= width) return text;
+    const cut = text.slice(0, width);
+    const space = cut.lastIndexOf(' ');
+    return `${(space > width * 0.6 ? cut.slice(0, space) : cut).replace(/[\s,.;:\-]+$/, '')}\u2026`;
+  });
+  return { lines, more: Math.max(0, bullets.length - lines.length) };
+}

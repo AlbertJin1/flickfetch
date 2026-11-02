@@ -89,7 +89,7 @@ async function fetchPlaylist(rawUrl) {
     if (parsed.protocol !== 'https:' || !/(^|\.)spotify\.(link|app\.link)$/.test(parsed.hostname)) {
       throw new Error('Paste a public Spotify playlist URL, for example https://open.spotify.com/playlist/…');
     }
-    const shortResponse = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30000), headers: { 'User-Agent': 'Mozilla/5.0 FlickFetch/2.1.1' } });
+    const shortResponse = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30000), headers: { 'User-Agent': 'Mozilla/5.0 FlickFetch/2.1.2' } });
     playlistId = parseSpotifyUrl(shortResponse.url);
     if (!playlistId) throw new Error('This share link did not resolve to a Spotify playlist. Check that it is a playlist link rather than a track or album.');
   }

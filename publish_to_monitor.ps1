@@ -8,7 +8,7 @@
   resumable 4 MiB chunks, SHA-256 verification), adapted for the Electron portable EXE:
     * the version comes from the EXE's File version (what the Monitor reads) and must match package.json;
     * release notes come from the CHANGELOG.md heading "## 2.1.0" or "## [2.1.0]";
-    * the EXE is zipped only when the ZIP is actually smaller (the portable EXE is built with compression "store" so unchanged files stay byte-identical for differential updates; the ZIP is the compact full-download fallback);
+    * the EXE is zipped only when the ZIP is actually smaller (the portable EXE is built with LZMA "maximum" compression, so it is already compact and the ZIP is usually skipped; updates are full downloads rather than block-level deltas);
     * every Monitor error body is printed, so a rejected release always says WHY.
   API key: -ApiKey, FLICKFETCH_MONITOR_KEY (or MONITOR_API_KEY), monitor-key.txt next to this script, or a secure prompt. It is never stored in the app.
   Target auto tries the LAN Monitor first and falls back to the public zrok URL when the LAN service is unavailable.
@@ -100,7 +100,9 @@ $log = Get-Content -Raw -Encoding UTF8 $Changelog
 $m = [regex]::Match($log, '(?ms)^##[ \t]+\[?v?' + [regex]::Escape($version) + '\]?(?=[\s\-:]|$)[^\r\n]*\r?\n(.*?)(?=^##[ \t]+(?!#)|\z)')
 if (-not $m.Success) { Fail ('CHANGELOG.md has no "## ' + $version + '" (or "## [' + $version + ']") section, so there are no release notes to send.') }
 $lines = New-Object System.Collections.Generic.List[string]
-foreach ($raw in ($m.Groups[1].Value -split '\r?\n')) {
+# A "### Technical notes" section (and anything after it in this release) is project history, not for the update window.
+$section = [regex]::Replace($m.Groups[1].Value, '(?ims)^###[ \t]+Technical notes.*\z', '')
+foreach ($raw in ($section -split '\r?\n')) {
     $l = $raw.TrimEnd()
     $l = [regex]::Replace($l, '\[([^\]]+)\]\([^)]*\)', '$1')   # [text](url) -> text
     $l = $l -replace '\*\*', '' -replace '`', ''

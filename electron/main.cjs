@@ -12,6 +12,7 @@ const os = require('node:os');
 const { parseLegacySettings } = require('./services/legacy-settings.cjs');
 const { loadWindowState, trackWindowState } = require('./services/window-state.cjs');
 const { MonitorService } = require('./services/monitor-service.cjs');
+const { APP_ID, applyWindowIdentity, repairPinnedShortcuts } = require('./services/taskbar-identity.cjs');
 
 // Data location: ALWAYS %LOCALAPPDATA%\FlickFetch (settings, history, monitor state, helper tools, staged updates).
 // Nothing is written next to the exe. A "FlickFetch-Data" folder left beside the exe by v2.1.0 is migrated once.
@@ -64,7 +65,7 @@ const DEFAULT_SETTINGS = {
   embedThumb: true,
   embedMeta: true,
   sponsor: false,
-  template: '%(title).150B [%(id)s].%(ext)s',
+  template: '%(title).150B.%(ext)s',
   restrict: false,
   overwrite: false,
   infoJson: false,
@@ -87,6 +88,7 @@ const DEFAULT_SETTINGS = {
   autoUpdate: true
 };
 
+const LEGACY_DEFAULT_TEMPLATE = '%(title).150B [%(id)s].%(ext)s';
 const SETTINGS_KEYS = new Set(Object.keys(DEFAULT_SETTINGS));
 let mainWindow;
 let splashWindow;
@@ -135,6 +137,12 @@ function loadSettings() {
     } catch (error) { emit('app:log', { level: 'warn', message: `Could not import legacy settings: ${error.message}` }); }
     settings = { ...DEFAULT_SETTINGS, ...migrated };
     if (Object.keys(migrated).length) saveSettings();
+  }
+  // v2.1.2: the default filename no longer carries the video id in brackets. Users who never customised the template
+  // still have the old default saved in settings.json, so move them to the new one. Custom templates are left alone.
+  if (settings.template === LEGACY_DEFAULT_TEMPLATE) {
+    settings.template = DEFAULT_SETTINGS.template;
+    saveSettings();
   }
   if (!settings.outputDir) settings.outputDir = DEFAULT_SETTINGS.outputDir;
   if (!fs.existsSync(settings.outputDir)) {
@@ -243,6 +251,8 @@ function createWindow() {
   mainWindow.on('maximize', () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('window:state-changed', { maximized: true }); });
   mainWindow.on('unmaximize', () => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('window:state-changed', { maximized: false }); });
   mainWindow.on('closed', () => { mainWindow = null; });
+  // Pinning or relaunching this window starts the real FlickFetch.exe (not the portable build's temp copy), so Windows shows one icon.
+  if (process.platform === 'win32' && app.isPackaged) applyWindowIdentity(mainWindow);
   mainWindow.webContents.on('did-fail-load', (_event, code, description) => {
     if (code !== -3) emit('app:log', { level: 'error', message: `The application view failed to load: ${description}` });
   });
@@ -477,7 +487,7 @@ function registerIpc() {
 }
 
 // Groups the taskbar button / jump list under FlickFetch's own identity (and lets the icon show correctly).
-if (process.platform === 'win32') app.setAppUserModelId('com.regualos.flickfetch');
+if (process.platform === 'win32') app.setAppUserModelId(APP_ID);
 
 app.whenReady().then(async () => {
   settingsFile = path.join(app.getPath('userData'), 'settings.json');
@@ -496,6 +506,8 @@ app.whenReady().then(async () => {
   await monitor.initialize();
   registerIpc();
   createWindow();
+  // An icon pinned earlier carries no app ID, so Windows keeps it apart from the running window; link them (takes effect on next launch).
+  if (process.platform === 'win32' && app.isPackaged) repairPinnedShortcuts({ shell, log: (level, message) => emit('app:log', { level, message }) });
   watchClipboard();
   if (app.isPackaged && process.platform === 'win32') {
     setTimeout(() => monitor.checkForUpdates().catch(error => emit('app:log', { level: 'warn', message: `FlickFetch update check failed: ${error.message}` })), 1800);

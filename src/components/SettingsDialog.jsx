@@ -190,7 +190,7 @@ export default function SettingsDialog({ initialSettings, toolStatus, toolsProgr
 
                 <Card title="Save location & naming" description="Where files go and how they are named." icon={FolderOpen}>
                   <PathField label="Output folder" value={values.outputDir} onChange={value => set('outputDir', value)} onBrowse={browseOutput} />
-                  <TextField label="Filename template" value={values.template} onChange={value => set('template', value)} hint="Default: %(title).150B [%(id)s].%(ext)s" mono />
+                  <TextField label="Filename template" value={values.template} onChange={value => set('template', value)} hint="Default: %(title).150B.%(ext)s" mono />
                   <Rows>
                     <Switch checked={values.restrict} onChange={value => set('restrict', value)} label="Restrict filenames" description="Use only ASCII characters and avoid spaces." />
                     <Switch checked={values.overwrite} onChange={value => set('overwrite', value)} label="Overwrite existing files" />

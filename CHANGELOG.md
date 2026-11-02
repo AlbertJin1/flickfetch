@@ -1,44 +1,25 @@
 # FlickFetch Changelog
 
-## [Unreleased]
+## [2.1.2] - 2026-11-02
 
-### Added (video detection on unsupported pages)
-- When yt-dlp has no extractor for a link (or finds no playable format), FlickFetch now inspects the page the way you would in DevTools, then downloads the real file. Before, such links simply failed with "Unsupported URL".
-- **What it looks for:** `<video src>`, `<source src type="video/mp4">` (also `data-src` and similar), `og:video` / `twitter:player:stream`, schema.org JSON-LD `contentUrl`, player configs inside scripts (including `\/`-escaped and `\u0026` URLs and `atob(...)` payloads), HLS (`.m3u8`) and DASH (`.mpd`) manifests, and the pages inside nested `<iframe>` players (up to 3 levels deep, 8 frames). HTML entities in signed URLs (`&amp;` in `?st=...&e=...`) are decoded, `<base>` and relative URLs are resolved, and images, subtitles, ads and preview clips are filtered or ranked down.
-- **Players built by JavaScript:** if the raw HTML has no video (for example Fluid Player, which creates the `<video>` tag after load), a hidden, sandboxed browser window loads the page, tries to start playback muted, and reads the live DOM of every frame (`currentSrc`, `<source>` tags) plus the media requests the player makes, like DevTools' Elements and Network panels. Media requests are only recorded, never downloaded by the inspector.
-- **Verified before downloading:** every candidate is probed with a one-chunk range request using the Referer a browser would send (the player frame, then the page, then its origin, then none). HTML error pages and blocked hot-links are rejected, and the working Referer is passed to yt-dlp (`--referer`, plus a browser `--user-agent`) so signed or hot-link protected CDN files such as `pool2.embedplayer.net/...mp4?st=...&e=...` download. The page title is used as the file title.
-- Embedded YouTube/Vimeo/Dailymotion/etc. players found in a page are handed to yt-dlp as the fallback when no direct file exists.
-- Failures now say what happened (for example "found 2 possible video links but none could be opened", or no video file found) instead of a bare yt-dlp error. Canceling works while a page is being inspected.
-- New **Find video on unsupported pages** switch in Settings (on by default). Your cookies file and proxy are respected; with a proxy set, pre-verification is skipped and yt-dlp does the checking. Protected streams (DRM, `blob:` MSE players with no reachable manifest) cannot be downloaded.
-- New `electron/services/page-sniffer.cjs` and `rendered-sniffer.cjs`, with tests in `tests/page-sniffer.test.cjs`.
+### Changed
+- Downloads are saved as "Title.mp3" now, without the video id in brackets.
+- Much smaller app: the exe is about 90-100 MB instead of 360 MB.
+- Updates are now full downloads instead of small partial ones.
 
-### Added (in-app audio preview)
-- **Preview** in the Spotify matcher now plays the matched version right inside FlickFetch, audio only, instead of opening YouTube in your browser. No video, no embedded web page.
-- A player bar appears above the status bar with play/pause, a seek slider, elapsed/total time, volume and mute (volume is remembered). It keeps playing while you switch tabs, only one preview plays at a time, and the playing song is highlighted in the list. Keyboard and screen-reader friendly, and the system media keys / overlay work too.
-- Each row's button reflects the state: Preview, Loading…, Pause, Resume, Replay or Retry. If a preview can't load you get a short, specific reason (for example a YouTube sign-in request, or an unavailable video) plus **Try again**, and an **Open on YouTube** button stays in the player as a fallback.
-- How it works: the already-installed yt-dlp resolves a direct audio-only stream, and a small `ffpreview://` protocol in the main process streams it to a plain `<audio>` element. Seeking works, only small chunks are fetched at a time (so skipping through a playlist is cheap), expired stream links are refreshed automatically, and only YouTube video ids and Google video hosts are ever accepted. The Content-Security-Policy only gained `media-src 'self' ffpreview:`.
-- **Reliable fallback:** if YouTube refuses the direct audio stream (HTTP 403/502), the preview automatically has yt-dlp fetch the audio the same way downloads do, into a temporary cache (`preview-cache` in the app data folder, at most 12 files, cleared on exit), and plays that file. Seeking is then instant. After two direct failures in a row, new previews skip the direct attempt. Details are logged as warnings.
-- New `electron/services/preview-service.cjs` with tests in `tests/preview-service.test.cjs`.
+### Fixed
+- Opening FlickFetch no longer adds a second taskbar icon next to the pinned one.
+- Hovering the taskbar icon shows only "Flick Fetch".
+- The update card in the sidebar shows a short summary instead of the whole changelog.
+- The update card in the sidebar can be dismissed with the X. It comes back when a newer version is released, and "Check for updates" always works.
 
-### Changed (Spotify matcher)
-- A candidate whose title is only *similar* is no longer flagged "Different title" when the uploading channel is one of the track's credited artists (for example "Future Islands" or "Future Islands - Topic" for a Future Islands song). That upload is treated as the real track and can be auto-matched. A name match on any credited artist counts, not just the first.
-- It stays strict elsewhere: the same title from an unrelated channel, a different song on the artist's channel, or a wrong length are still flagged.
+### Technical notes
+_Not shown in the update window; kept here for the project history._
 
-### Changed (differential updates)
-- The build now uses electron-builder `compression: "store"`. The old LZMA-compressed payload meant a one-line change altered every byte of the exe, so no block ever matched and updates silently fell back to downloading everything. Unchanged files now stay byte-identical, so only the changed blocks are downloaded. The portable exe is larger on disk (about 2.5x); the Monitor's ZIP package keeps the full-download fallback small.
-- Installed builds now use differential updates too. They previously always downloaded the whole portable exe; they now reuse blocks from the installed program files and any earlier saved release.
-- The update dialog and toast report what was really transferred (for example "Downloaded 12.4 MB of 231.0 MB (only the changed parts)") and show how many blocks changed while downloading.
-- The client no longer keeps the old exe in memory while rebuilding; it reads reusable blocks from disk.
-
-### Changed (typography)
-- New type system, bundled locally so it looks the same offline: **Bricolage Grotesque** for headings and the brand, **Instrument Sans** for interface text, and **JetBrains Mono** for versions, paths, shortcuts and logs. Previously the app named Inter but never shipped it, so it fell back to Segoe UI.
-- The startup splash uses the same fonts.
-- Removed the top workspace tab bar (the sidebar already has the same links) and fixed the Review dialog stealing focus from the feedback box while typing.
-
-### Added (Check for updates dialog)
-- **Check for updates** now opens a proper Software update dialog that runs a fresh check and shows one clear result: checking, up to date, update available (installed vs latest version, release notes, download/install with live progress), couldn't reach the Monitor (with Try again), or updates unavailable.
-- Update checks now work in development runs (`npm run dev`) too. They are read-only: a development build never downloads or replaces anything. If the build is newer than the latest published release, the dialog says "You're ahead of the latest release" and calls it the latest unreleased version.
-- The dialog labels the build (Development, Portable, or Installed) and shows when it was last checked.
+- The default filename template is `%(title).150B.%(ext)s`. Users still on the old default are migrated on first launch; custom templates are left alone.
+- Build: electron-builder `compression: "maximum"` (was `"store"`), `electronLanguages: ["en-US"]`, and `build/afterPack.cjs` removes the unused WebGPU `dxcompiler.dll`. A compressed exe shares few byte blocks between releases, so differential updates fall back to the ZIP or full download.
+- Taskbar: new `electron/services/taskbar-identity.cjs` sets the window's relaunch command to the real `FlickFetch.exe` and stamps the app ID onto an existing pinned shortcut (applies on the next launch).
+- The exe description is "Flick Fetch" (`description` in `package.json`); the product name stays `FlickFetch` because `release.bat` validates it.
 
 ## [2.1.1] - 2026-10-31
 

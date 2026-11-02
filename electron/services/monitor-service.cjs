@@ -1182,7 +1182,7 @@ class MonitorService {
     const missingRawBytes = missing.reduce((sum, hash) => sum + (sizeByHash.get(hash) || 0), 0);
     const zipBytes = Number(update.package?.size || 0);
     const threshold = zipBytes > 0 ? Math.min(Number(update.size) * 0.92, zipBytes * 1.75) : Number(update.size) * 0.92;
-    if (missingRawBytes >= threshold) throw new Error(`Only ${Math.round((1 - missingRawBytes / Number(update.size)) * 100)}% of the executable matches the installed files (a stored, uncompressed build is needed for small updates); the compressed update is smaller.`);
+    if (missingRawBytes >= threshold) throw new Error(`Only ${Math.round((1 - missingRawBytes / Number(update.size)) * 100)}% of the executable matches the installed files (compressed builds rarely share blocks between releases); the compressed update is smaller.`);
 
     let downloaded = new Map();
     let deltaTransferBytes = 0;

@@ -1,7 +1,7 @@
 {
   "name": "flickfetch",
-  "version": "2.1.1",
-  "description": "FlickFetch desktop media downloader built with React, Electron, and Tailwind CSS.",
+  "version": "2.1.2",
+  "description": "Flick Fetch",
   "author": "Jessie Albert Regualos",
   "license": "UNLICENSED",
   "private": true,
@@ -15,7 +15,7 @@
     "dist:win": "npm run build && electron-builder --win nsis --x64",
     "dist:portable": "npm run build && electron-builder --win portable --x64",
     "build:win": "npm run build && electron-builder --win portable --x64 --publish never",
-    "check": "node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/services/monitor-service.cjs && node --check electron/services/monitor-api.cjs && node --check electron/services/review-queue-policy.cjs && node --check electron/services/tool-manager.cjs && node --check electron/services/download-service.cjs && node --check electron/services/spotify-service.cjs && node --check electron/services/japanese.cjs && node --check electron/services/preview-service.cjs && node --check electron/services/page-sniffer.cjs && node --check electron/services/rendered-sniffer.cjs && node --check electron/services/legacy-settings.cjs && node --check electron/services/window-state.cjs",
+    "check": "node --check electron/main.cjs && node --check electron/preload.cjs && node --check electron/services/monitor-service.cjs && node --check electron/services/monitor-api.cjs && node --check electron/services/review-queue-policy.cjs && node --check electron/services/tool-manager.cjs && node --check electron/services/download-service.cjs && node --check electron/services/spotify-service.cjs && node --check electron/services/japanese.cjs && node --check electron/services/preview-service.cjs && node --check electron/services/page-sniffer.cjs && node --check electron/services/rendered-sniffer.cjs && node --check electron/services/legacy-settings.cjs && node --check electron/services/window-state.cjs && node --check electron/services/taskbar-identity.cjs && node --check build/afterPack.cjs",
     "test": "node --test"
   },
   "dependencies": {
@@ -38,7 +38,9 @@
     "appId": "com.regualos.flickfetch",
     "productName": "FlickFetch",
     "asar": true,
-    "compression": "store",
+    "compression": "maximum",
+    "electronLanguages": [ "en-US" ],
+    "afterPack": "build/afterPack.cjs",
     "directories": {
       "output": "release",
       "buildResources": "build"
@@ -48,6 +50,9 @@
       "electron/**/*",
       "package.json",
       "!**/*.map",
+      "!**/*.md",
+      "!**/test/**",
+      "!**/tests/**",
       "!node_modules/.cache/**/*"
     ],
     "win": {
